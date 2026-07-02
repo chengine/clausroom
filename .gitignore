@@ -1,0 +1,25 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+
+# runtime data (SQLite DB + artifact storage)
+data/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite*
+
+# environment / secrets (keep .env.example)
+.env
+.env.*
+!.env.example
+
+# local bridge/agent state
+.clausroom/
+
+# scratch space
+scratch/
+scratch

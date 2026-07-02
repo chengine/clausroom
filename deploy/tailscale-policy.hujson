@@ -1,0 +1,53 @@
+// clausroom tailnet policy (HuJSON) — paste/merge into your Tailscale admin
+// console (Access controls). Shape follows the product spec section 4.1.
+//
+// Replace before applying:
+//   student@example.com  -> the HOST/student's Tailscale login
+//   teacher@example.com  -> the GUEST/teacher's Tailscale login
+//
+// Then tag the server machine when bringing it up:
+//   sudo tailscale up --hostname=clausroom-host --advertise-tags=tag:agent-room-server
+//
+// Remember: the teacher should be given a DEVICE SHARE of the server machine
+// (Machines -> clausroom-host -> Share), never a full tailnet invite. This
+// policy is defense-in-depth on top of that.
+{
+  "tagOwners": {
+    // Only tailnet admins may apply this tag; the server is infrastructure,
+    // not a personal device, and can be replaced without changing policy.
+    "tag:agent-room-server": ["autogroup:admin"],
+  },
+
+  "grants": [
+    {
+      // The host may reach the TLS front (443, via `tailscale serve`) and the
+      // raw backend port (3000) for debugging from their own devices.
+      "src": ["student@example.com"],
+      "dst": ["tag:agent-room-server"],
+      "ip": ["tcp:443", "tcp:3000"],
+    },
+    {
+      // The guest gets HTTPS to the chatroom and NOTHING else: no SSH, no raw
+      // backend port, no other machines. If you skip `tailscale serve` and
+      // expose port 3000 directly instead, change this to "tcp:3000".
+      "src": ["teacher@example.com"],
+      "dst": ["tag:agent-room-server"],
+      "ip": ["tcp:443"],
+    },
+  ],
+
+  // Keep empty: no Tailscale SSH to the chatroom host for anyone.
+  "ssh": [],
+
+  // Policy tests run on every save and fail the save if the rules regress.
+  "tests": [
+    {
+      "src": "teacher@example.com",
+      "accept": ["tag:agent-room-server:443"],
+      "deny": [
+        "tag:agent-room-server:22",   // no SSH
+        "tag:agent-room-server:3000", // no raw backend, only the TLS front
+      ],
+    },
+  ],
+}

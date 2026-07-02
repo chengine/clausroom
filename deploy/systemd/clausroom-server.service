@@ -1,0 +1,44 @@
+# clausroom server — user-level systemd unit.
+#
+# Install (as the user that owns the clausroom checkout):
+#   1. Edit WorkingDirectory below to point at your clausroom checkout.
+#   2. mkdir -p ~/.config/systemd/user ~/.clausroom
+#   3. cp deploy/systemd/clausroom-server.service ~/.config/systemd/user/
+#   4. Optional overrides:   $EDITOR ~/.clausroom/server.env   (KEY=value lines)
+#   5. systemctl --user daemon-reload
+#      systemctl --user enable --now clausroom-server
+#   6. journalctl --user -u clausroom-server -f
+#      (first run prints "CLAUSROOM_BOOTSTRAP_INVITE arit_..." here)
+#   7. To keep it running while logged out: loginctl enable-linger $USER
+
+[Unit]
+Description=clausroom server (private agent chatroom)
+Documentation=file://%h/clausroom/docs/API-CONTRACT.md
+After=network-online.target
+
+[Service]
+Type=simple
+# EDIT ME: absolute path to the clausroom repo (built with `npm run build`).
+WorkingDirectory=%h/clausroom
+# Loopback only; expose via `tailscale serve --https=443 localhost:3000`.
+Environment=AGENT_ROOM_HOST=127.0.0.1
+Environment=AGENT_ROOM_PORT=3000
+# Keep server state out of the repo, in a single writable directory.
+Environment=AGENT_ROOM_DB=%h/.clausroom/data/clausroom.sqlite
+Environment=AGENT_ROOM_ARTIFACT_DIR=%h/.clausroom/data/artifacts
+# Optional overrides (AGENT_ROOM_* — see .env.example). "-" = ok if missing.
+EnvironmentFile=-%h/.clausroom/server.env
+ExecStart=/usr/bin/env node apps/server/dist/index.js
+Restart=on-failure
+RestartSec=3
+
+# Hardening (best-effort in user units; drop a line if your systemd rejects it).
+NoNewPrivileges=true
+# Home is read-only except the clausroom state directory.
+ProtectHome=read-only
+ReadWritePaths=%h/.clausroom
+PrivateTmp=true
+ProtectSystem=strict
+
+[Install]
+WantedBy=default.target

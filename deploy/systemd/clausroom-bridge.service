@@ -1,0 +1,43 @@
+# clausroom bridge — user-level systemd unit (OPTIONAL).
+#
+# Normally you do NOT need this: the bridge is a stdio MCP server that your
+# coding agent (Claude Code / Codex) spawns on demand — see
+# examples/claude-code-setup.md. Use this unit only if your bridge build
+# supports a long-running/daemon mode and you want it supervised.
+#
+# Install (on the machine whose agent uses the bridge — each human runs their own):
+#   1. Edit WorkingDirectory below to point at your clausroom checkout.
+#   2. mkdir -p ~/.config/systemd/user ~/.clausroom
+#   3. cp examples/bridge.student.toml ~/.clausroom/bridge.toml   # then edit it
+#   4. Put the token in ~/.clausroom/bridge.env (chmod 600):
+#        AGENT_ROOM_BRIDGE_TOKEN=arbt_...
+#   5. cp deploy/systemd/clausroom-bridge.service ~/.config/systemd/user/
+#   6. systemctl --user daemon-reload
+#      systemctl --user enable --now clausroom-bridge
+
+[Unit]
+Description=clausroom local bridge (outbound-only room connector)
+After=network-online.target
+
+[Service]
+Type=simple
+# EDIT ME: absolute path to the clausroom repo (built with `npm run build`).
+WorkingDirectory=%h/clausroom
+# The bridge token comes from the environment, never from a config file.
+EnvironmentFile=%h/.clausroom/bridge.env
+ExecStart=/usr/bin/env node apps/bridge/dist/index.js mcp --config %h/.clausroom/bridge.toml
+Restart=on-failure
+RestartSec=3
+
+# Hardening (best-effort in user units; drop a line if your systemd rejects it).
+NoNewPrivileges=true
+PrivateTmp=true
+# Note: the bridge must READ your project roots and WRITE its downloads dir,
+# so ProtectHome is not set here. Tighten ReadWritePaths/ReadOnlyPaths to your
+# bridge.toml [filesystem] settings if you want, e.g.:
+#   ProtectHome=read-only
+#   ReadOnlyPaths=%h/path/to/project
+#   ReadWritePaths=%h/.clausroom/downloads
+
+[Install]
+WantedBy=default.target

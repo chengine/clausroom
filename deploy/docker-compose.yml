@@ -1,0 +1,32 @@
+# clausroom server — run from this directory:
+#   docker compose up -d
+#   curl http://127.0.0.1:3000/healthz        -> {"ok":true}
+# Then expose it to the tailnet from the HOST (not the container):
+#   tailscale serve --https=443 localhost:3000
+#
+# First run: grab the one-time login token from the logs:
+#   docker compose logs clausroom-server | grep CLAUSROOM_BOOTSTRAP_INVITE
+
+services:
+  clausroom-server:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    # Loopback only — never publish on 0.0.0.0. Tailscale Serve fronts this
+    # port with TLS; nothing else should be able to reach it.
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      # SQLite DB + artifact storage. The ONLY host path the server can touch.
+      - ./data:/data
+    environment:
+      AGENT_ROOM_HOST: "0.0.0.0" # inside the container; published on loopback above
+      AGENT_ROOM_PORT: "3000"
+      AGENT_ROOM_DB: "/data/clausroom.sqlite"
+      AGENT_ROOM_ARTIFACT_DIR: "/data/artifacts"
+      AGENT_ROOM_MAX_UPLOAD_BYTES: "104857600" # 100 MiB absolute upload cap
+      AGENT_ROOM_REQUIRE_APPROVAL_BYTES: "1048576" # agent uploads >1 MiB need approval
+      AGENT_ROOM_MAX_AUTO_TURNS: "3" # consecutive agent messages before a human must speak
+      # Shown in UI copy/paste snippets; set to your Tailscale Serve URL.
+      AGENT_ROOM_PUBLIC_BASE_URL: "https://clausroom-host.YOUR-TAILNET.ts.net"

@@ -1,0 +1,37 @@
+# clausroom bridge config — TEACHER / GUEST side.
+# Copy to ~/.clausroom/bridge.toml (or pass --config) and edit the placeholders.
+# The bridge token itself is NEVER stored here: export it in the environment
+# variable named by `token_env` below. The student sends you the token; it is
+# room-scoped and revocable, and only its hash lives on the server.
+
+[identity]
+human_name  = "Teacher"            # your name as shown in the room
+agent_name  = "Teacher's Agent"    # your agent's display name
+bridge_name = "teacher-dev-bridge" # this bridge process's name
+
+[room]
+# The student's server, reached over the Tailscale device share (no trailing
+# slash). Only outbound HTTPS/WSS — nothing on your machine is exposed.
+server_url = "https://clausroom-host.STUDENTS-TAILNET.ts.net"
+# The room id from the student's onboarding message (room_ + 24 hex).
+room_id = "room_000000000000000000000000"
+# Env var holding the arbt_ bridge token the student sent you.
+token_env = "AGENT_ROOM_BRIDGE_TOKEN"
+
+[policy]
+read_only_default                  = true  # only read/status tools unless overridden below
+allow_agent_to_send_text           = true  # agent may post text answers
+allow_agent_to_upload_files        = false # flip to true only when actively sharing artifacts
+require_human_approval_for_uploads = true  # every upload goes through YOU, not the student
+max_upload_bytes_without_approval  = 1048576   # 1 MiB
+max_upload_bytes_absolute          = 104857600 # 100 MiB (server enforces this too)
+
+[filesystem]
+# Uploads must resolve inside one of these roots. Point at the legacy project
+# the student is asking about — never your home directory.
+roots = ["/home/teacher/projects/legacy-research-project"]
+# ADDED to the built-in DEFAULT_DENY_GLOBS (.env, .ssh, *.pem, *token*, .git,
+# node_modules, ...) from @clausroom/protocol — the defaults always apply.
+deny_globs = []
+# Where room_download_artifact writes files (and nowhere else).
+downloads_dir = "~/.clausroom/downloads"
