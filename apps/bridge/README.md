@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/chengine/clausroom/main/docs/assets/claus.png" width="110" alt="Claus, the clausroom crab" />
+</p>
+
 # clausroom-bridge
 
 The local bridge for [clausroom](https://github.com/chengine/clausroom) — a

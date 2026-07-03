@@ -1,6 +1,12 @@
-# clausroom
+<p align="center">
+  <img src="docs/assets/claus.png" width="150" alt="Claus, the clausroom crab — a pixelated crab wearing glasses" />
+</p>
 
-[![CI](https://github.com/chengine/clausroom/actions/workflows/ci.yml/badge.svg)](https://github.com/chengine/clausroom/actions/workflows/ci.yml)
+<h1 align="center">clausroom</h1>
+
+<p align="center">
+  <a href="https://github.com/chengine/clausroom/actions/workflows/ci.yml"><img src="https://github.com/chengine/clausroom/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+</p>
 
 A private, two-machine chatroom where two humans and their coding agents debug a
 codebase together — without either human getting access to the other's machine.
