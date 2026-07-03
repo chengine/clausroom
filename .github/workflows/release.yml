@@ -1,0 +1,96 @@
+name: Release
+
+# Runs on version tags (v0.1.0, v1.2.3, ...):
+#   1. build-and-smoke  — full build + end-to-end smoke test (gate for everything below)
+#   2. docker-image     — build deploy/Dockerfile, push ghcr.io/chengine/clausroom:{version,latest}
+#   3. npm-publish      — publish the clausroom-bridge workspace to npm
+#                         (skips cleanly when the NPM_TOKEN secret is not configured)
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run smoke
+
+  docker-image:
+    needs: build-and-smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Docker metadata (tags + labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/chengine/clausroom
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  npm-publish:
+    needs: build-and-smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: "https://registry.npmjs.org"
+      # Secrets cannot be referenced in a job-level `if`, so detect the token in a
+      # step (mapped through env) and gate the publish on the step output.
+      - name: Check whether NPM_TOKEN is configured
+        id: npm_token
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -n "$NPM_TOKEN" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "NPM_TOKEN secret is not configured — skipping npm publish."
+          fi
+      - name: Install and build
+        if: steps.npm_token.outputs.present == 'true'
+        run: |
+          npm ci
+          npm run build
+      - name: Publish clausroom-bridge to npm
+        if: steps.npm_token.outputs.present == 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --workspace clausroom-bridge --access public

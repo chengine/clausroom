@@ -1,0 +1,2 @@
+# esbuild bundle output for npm publishing (built by `npm run bundle`)
+dist-npm/

@@ -1,6 +1,7 @@
 import { useRef, useState, type KeyboardEvent } from 'react';
 import { DEFAULTS, type Participant } from '@clausroom/protocol';
 import { errorText } from '../api.js';
+import { CONTINUE_MESSAGE_BODY } from '../useRoomState.js';
 import { BotIcon, PersonIcon, SendIcon } from './icons.js';
 
 interface ComposerProps {
@@ -37,10 +38,14 @@ export function Composer({ participants, meId, colorOf, canSend, onSend }: Compo
   async function send() {
     const trimmed = body.trim();
     if (!trimmed || sending || !canSend) return;
+    // '/continue' composer command: post the canonical room-wide turn-grant
+    // message instead (same message the sidebar Continue button sends).
+    const isContinue = trimmed.toLowerCase() === '/continue';
     setSending(true);
     setError(null);
     try {
-      await onSend(trimmed, recipients);
+      if (isContinue) await onSend(CONTINUE_MESSAGE_BODY, []);
+      else await onSend(trimmed, recipients);
       setBody('');
       textareaRef.current?.focus();
     } catch (err) {

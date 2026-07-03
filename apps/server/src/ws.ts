@@ -1,15 +1,23 @@
 /**
  * WebSocket hub: GET /ws?room_id=<id>&token=<session-or-bridge-token>.
  *
- * Close codes (docs/API-CONTRACT.md §8): 4001 bad/missing token,
+ * Close codes (docs/API-CONTRACT.md §8): 4001 bad/missing/expired token,
  * 4003 not a participant / bridge token for a different room, 4004 unknown room.
- * Client -> server frames: only {"type":"ping"}; everything else gets an error
- * frame. All mutations happen over REST.
+ * Client -> server frames: {"type":"ping"} (answered with pong) and
+ * {"type":"status","state":"working"|"idle"} (agent activity report — honored
+ * only for agent-kind users, silently ignored otherwise). Everything else gets
+ * an error frame. All mutations happen over REST.
  */
 import type { IncomingMessage, Server as HttpServer } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { WebSocketServer, WebSocket } from 'ws';
-import { WsClientFrameSchema, type WsServerFrame } from '@clausroom/protocol';
+import {
+  DEFAULTS,
+  WsClientFrameSchema,
+  type ActivityState,
+  type UserKind,
+  type WsServerFrame,
+} from '@clausroom/protocol';
 import { resolveApiToken } from './auth.js';
 import { toParticipant, toRoom, type Store } from './db.js';
 
@@ -17,6 +25,7 @@ interface Conn {
   ws: WebSocket;
   roomId: string;
   userId: string;
+  userKind: UserKind;
   isAlive: boolean;
 }
 
@@ -25,9 +34,20 @@ const HEARTBEAT_INTERVAL_MS = 30_000;
 export class WsHub {
   private readonly wss: WebSocketServer;
   private readonly rooms = new Map<string, Set<Conn>>();
+  /**
+   * Ephemeral per-user agent activity ('working' pills), keyed
+   * `<roomId>:<userId>`. An entry exists iff the user is 'working' (idle is
+   * the default state); its timer auto-reverts to idle after
+   * DEFAULTS.ACTIVITY_IDLE_TIMEOUT_MS without a refreshing status frame.
+   * Never persisted — no DB row, and the hello frame carries no activity info.
+   */
+  private readonly activity = new Map<string, NodeJS.Timeout>();
   private heartbeat: NodeJS.Timeout | null = null;
 
-  constructor(private readonly store: Store) {
+  constructor(
+    private readonly store: Store,
+    private readonly sessionTtlDays: number,
+  ) {
     this.wss = new WebSocketServer({ noServer: true });
   }
 
@@ -64,6 +84,8 @@ export class WsHub {
   close(): void {
     if (this.heartbeat) clearInterval(this.heartbeat);
     this.heartbeat = null;
+    for (const timer of this.activity.values()) clearTimeout(timer);
+    this.activity.clear();
     for (const conns of this.rooms.values()) {
       for (const conn of conns) conn.ws.terminate();
     }
@@ -76,7 +98,11 @@ export class WsHub {
       const token = url.searchParams.get('token') ?? '';
       const roomId = url.searchParams.get('room_id') ?? '';
 
-      const auth = resolveApiToken(this.store, token);
+      const auth = resolveApiToken(this.store, token, this.sessionTtlDays);
+      if (auth === 'expired') {
+        ws.close(4001, 'expired session token');
+        return;
+      }
       if (!auth) {
         ws.close(4001, 'bad or missing token');
         return;
@@ -96,18 +122,18 @@ export class WsHub {
         return;
       }
 
-      this.register(ws, room.id, auth.user.id);
+      this.register(ws, room.id, auth.user.id, auth.user.kind);
     });
   }
 
-  private register(ws: WebSocket, roomId: string, userId: string): void {
+  private register(ws: WebSocket, roomId: string, userId: string, userKind: UserKind): void {
     let conns = this.rooms.get(roomId);
     if (!conns) {
       conns = new Set<Conn>();
       this.rooms.set(roomId, conns);
     }
     const before = this.presence(roomId);
-    const conn: Conn = { ws, roomId, userId, isAlive: true };
+    const conn: Conn = { ws, roomId, userId, userKind, isAlive: true };
     conns.add(conn);
 
     ws.on('pong', () => {
@@ -146,7 +172,11 @@ export class WsHub {
     conns.delete(conn);
     if (conns.size === 0) this.rooms.delete(conn.roomId);
     const stillOnline = this.presence(conn.roomId).includes(conn.userId);
-    if (!stillOnline) this.broadcastPresence(conn.roomId);
+    if (!stillOnline) {
+      this.broadcastPresence(conn.roomId);
+      // Last socket closed: revert (and broadcast) working -> idle immediately.
+      this.setActivity(conn.roomId, conn.userId, 'idle');
+    }
   }
 
   private broadcastPresence(roomId: string): void {
@@ -163,13 +193,52 @@ export class WsHub {
     }
     const frame = WsClientFrameSchema.safeParse(parsed);
     if (!frame.success) {
-      this.sendError(conn.ws, 'Unsupported client frame; only {"type":"ping"} is accepted.');
+      this.sendError(
+        conn.ws,
+        'Unsupported client frame; only {"type":"ping"} and {"type":"status"} are accepted.',
+      );
       return;
     }
-    if (frame.data.type === 'ping' && conn.ws.readyState === WebSocket.OPEN) {
-      const pong: WsServerFrame = { type: 'pong' };
-      conn.ws.send(JSON.stringify(pong));
+    if (frame.data.type === 'ping') {
+      if (conn.ws.readyState === WebSocket.OPEN) {
+        const pong: WsServerFrame = { type: 'pong' };
+        conn.ws.send(JSON.stringify(pong));
+      }
+      return;
     }
+    // status frame: honored only for agent-kind users; silently ignored
+    // otherwise (valid frame, no error, no effect).
+    if (conn.userKind !== 'agent') return;
+    this.setActivity(conn.roomId, conn.userId, frame.data.state);
+  }
+
+  /**
+   * Apply an activity state, broadcasting only on change. A repeated
+   * 'working' report refreshes the auto-idle timer without rebroadcasting.
+   */
+  private setActivity(roomId: string, userId: string, state: ActivityState): void {
+    const key = `${roomId}:${userId}`;
+    const existing = this.activity.get(key);
+    if (state === 'working') {
+      if (existing) clearTimeout(existing);
+      const timer = setTimeout(
+        () => this.setActivity(roomId, userId, 'idle'),
+        DEFAULTS.ACTIVITY_IDLE_TIMEOUT_MS,
+      );
+      timer.unref();
+      this.activity.set(key, timer);
+      if (!existing) this.broadcastActivity(roomId, userId, 'working');
+      return;
+    }
+    if (existing) {
+      clearTimeout(existing);
+      this.activity.delete(key);
+      this.broadcastActivity(roomId, userId, 'idle');
+    }
+  }
+
+  private broadcastActivity(roomId: string, userId: string, state: ActivityState): void {
+    this.broadcast(roomId, { type: 'activity', payload: { user_id: userId, state } });
   }
 
   private sendError(ws: WebSocket, message: string): void {

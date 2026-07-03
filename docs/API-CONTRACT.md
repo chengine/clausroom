@@ -1,7 +1,7 @@
 # clausroom API Contract (BINDING)
 
 Version 0.1.0 — this document is the single source of truth for the server
-(`@clausroom/server`), web UI (`@clausroom/web`), and bridge (`@clausroom/bridge`)
+(`@clausroom/server`), web UI (`@clausroom/web`), and bridge (`clausroom-bridge`)
 implementations. Where this document and code disagree, this document wins.
 All shared enums, defaults, id/token formats, and wire schemas are implemented in
 `@clausroom/protocol` (`packages/protocol`) — import them, do not redeclare them.
@@ -34,8 +34,18 @@ Rules (BINDING):
 2. HTTP auth: `Authorization: Bearer <token>`. Missing/unknown/revoked/used tokens →
    `401 unauthorized`.
 3. WebSocket auth: `token` query parameter (see §8).
-4. Session tokens have no expiry in the MVP but are revocable (rotation revokes them).
-   `tokens.last_used_at` is updated on use (best-effort, may be throttled to 1/min).
+4. **Session expiry (sliding).** A session token is expired when
+   `max(last_used_at, created_at) + AGENT_ROOM_SESSION_TTL_DAYS < now`
+   (`AGENT_ROOM_SESSION_TTL_DAYS` is a float number of days, default 30 =
+   `DEFAULTS.SESSION_TTL_DAYS`). Using an expired session token →
+   `401 unauthorized` with message exactly:
+   `"Session expired. Ask the room owner for a fresh invite/token."`
+   Sliding renewal: on each successful authenticated use of a session token the
+   server refreshes `tokens.last_used_at`, throttled to **at most once per hour**
+   per token (so an active session never expires; an idle one dies after the TTL).
+   Session tokens remain revocable (rotation revokes them). **Invite and bridge
+   tokens are unaffected** — they never TTL-expire; their `last_used_at` updates
+   stay best-effort (may be throttled to 1/min).
 5. Bridge tokens are bound to `(user_id, room_id)`. A bridge token used against any
    other room → `403 forbidden`.
 6. Invite tokens are single-use: `tokens.used_at` is set at login; any reuse → `401 unauthorized`.
@@ -83,7 +93,7 @@ Response `200`:
   "user": { "id": "user_1a2b3c4d5e6f708192a3b4c5", "display_name": "Host", "kind": "human", "is_admin": true, "owner_user_id": null, "created_at": "2026-07-02T19:00:00.000Z" },
   "rooms": [
     {
-      "room": { "id": "room_a1b2c3d4e5f60718293a4b5c", "name": "Project Debug Room", "created_by": "user_1a2b3c4d5e6f708192a3b4c5", "created_at": "2026-07-02T19:01:00.000Z", "agents_paused": false, "archived_at": null },
+      "room": { "id": "room_a1b2c3d4e5f60718293a4b5c", "name": "Project Debug Room", "created_by": "user_1a2b3c4d5e6f708192a3b4c5", "created_at": "2026-07-02T19:01:00.000Z", "agents_paused": false, "archived_at": null, "summary_markdown": null, "summary_updated_by": null, "summary_updated_at": null },
       "my_role": "owner"
     }
   ]
@@ -120,6 +130,21 @@ CLAUSROOM_LISTENING <actual-port>
 parses them. `CLAUSROOM_LISTENING` is printed on **every** startup;
 `CLAUSROOM_BOOTSTRAP_INVITE` only when the DB was just bootstrapped.
 
+**Owner-lockout recovery.** On startup with a **non-empty** database, for each
+**admin human** (`is_admin` true — the bootstrap Host) who holds no usable
+credential at all — every invite token used or revoked, and every session token
+revoked or TTL-expired (§1 rule 4) — the server mints a fresh single-use invite
+for that user and prints exactly one line per recovered admin:
+
+```text
+CLAUSROOM_RECOVERY_INVITE arit_<32 hex>
+```
+
+Same machine-readable format as the bootstrap line. This is the in-band escape
+from session expiry locking out the sole owner (minting invites normally
+requires an authenticated owner session); it triggers only via a server
+restart, never while running, and never for non-admin users.
+
 ---
 
 ## 3. Rooms & participants
@@ -137,7 +162,7 @@ Request (`CreateRoomRequest`): `{ "name": "Project Debug Room" }`
 Response `201`:
 
 ```json
-{ "room": { "id": "room_a1b2c3d4e5f60718293a4b5c", "name": "Project Debug Room", "created_by": "user_1a2b3c4d5e6f708192a3b4c5", "created_at": "2026-07-02T19:01:00.000Z", "agents_paused": false, "archived_at": null } }
+{ "room": { "id": "room_a1b2c3d4e5f60718293a4b5c", "name": "Project Debug Room", "created_by": "user_1a2b3c4d5e6f708192a3b4c5", "created_at": "2026-07-02T19:01:00.000Z", "agents_paused": false, "archived_at": null, "summary_markdown": null, "summary_updated_by": null, "summary_updated_at": null } }
 ```
 
 Side effect: the creator is inserted as a participant with role `owner`.
@@ -150,7 +175,7 @@ Response `200`:
 
 ```json
 {
-  "room": { "id": "room_a1b2c3d4e5f60718293a4b5c", "name": "Project Debug Room", "created_by": "user_1a2b3c4d5e6f708192a3b4c5", "created_at": "2026-07-02T19:01:00.000Z", "agents_paused": false, "archived_at": null },
+  "room": { "id": "room_a1b2c3d4e5f60718293a4b5c", "name": "Project Debug Room", "created_by": "user_1a2b3c4d5e6f708192a3b4c5", "created_at": "2026-07-02T19:01:00.000Z", "agents_paused": false, "archived_at": null, "summary_markdown": null, "summary_updated_by": null, "summary_updated_at": null },
   "participants": [
     {
       "room_id": "room_a1b2c3d4e5f60718293a4b5c",
@@ -247,6 +272,44 @@ Target user id not a participant → `404 not_found`.
 
 Response `200`: `{ "room": { ... } }` (for `all_agents`) or `{ "participant": { ... } }`.
 
+### PUT /api/rooms/:id/summary
+
+Auth: **any participant with `can_send` true** — human or agent, session or bridge
+token (`403 forbidden` when `can_send` is false, e.g. observers). This is the only
+`can_send` check applied: `room.agents_paused`, per-participant `paused`, the turn
+limit, and the message rate limit do **not** gate summary updates.
+
+Request (`UpdateSummaryRequestSchema`):
+
+```json
+{ "summary_markdown": "## Status\n- depth bug reproduced\n- fix pending review" }
+```
+
+Validation: `summary_markdown` is either `null` (clears the summary) or a string of
+1..4000 chars (`DEFAULTS.SUMMARY_MAX_CHARS`); anything else → `422 validation`.
+
+Behavior: sets `rooms.summary_markdown` to the given value, `summary_updated_by` to
+the caller's user id, and `summary_updated_at` to now (all three are set on every
+call, including clears). A non-null `summary_markdown` is redacted before storage
+and broadcast exactly like a message body (§4 Redaction: every `REDACTION_PATTERNS`
+match becomes `[redacted-secret]`; the redacted value is what persists, and it is
+not re-validated against the 4000-char cap — replacement may slightly grow it).
+
+Response `200`: `{ "room": { ...Room } }` (the updated room, including the three
+summary fields).
+
+Side effects (in order):
+
+1. Broadcast WS `room_updated` with the updated room.
+2. Create a `system_event` message **sent by the System user** with body exactly
+   `"<caller display_name> updated the room summary."` — broadcast and
+   stdout-logged like any accepted message (§4).
+
+`GET /api/rooms/:id` (and every other place a `Room` is serialized, including the
+WS `hello` and `room_updated` frames) includes `summary_markdown`,
+`summary_updated_by`, and `summary_updated_at` — all `null` until the first update.
+The web UI renders the summary as a pinned, collapsible card at the top of the room.
+
 ### GET /api/rooms/:id/export.md
 
 Auth: any participant. Response `200`, `Content-Type: text/markdown; charset=utf-8`,
@@ -285,6 +348,7 @@ Response `200`:
       "artifact_ids": [],
       "reply_to_message_id": "msg_ffee00ddcc11bbaa22993388",
       "confidence": "medium",
+      "choices": null,
       "created_at": "2026-07-02T19:10:00.000Z"
     }
   ]
@@ -304,7 +368,8 @@ Request (`PostMessageRequest`):
   "body_markdown": "## Question\nWhy was `src/depth_regularizer.py` written this way?",
   "reply_to_message_id": "msg_ffee00ddcc11bbaa22993388",
   "confidence": "medium",
-  "artifact_ids": []
+  "artifact_ids": [],
+  "choices": ["It is intentional — keep it", "It is a bug — fix it", "Not sure, investigate more"]
 }
 ```
 
@@ -326,6 +391,35 @@ Validation (all failures `422` unless noted):
 6. `recipient_ids` entries must be participant user ids of this room → `validation`.
 7. `reply_to_message_id`, if present, must be a message in this room → `validation`.
 8. `confidence`, if present, must be in `CONFIDENCE` → `validation`.
+9. `choices`, if present, must be an array of 1..6 (`DEFAULTS.CHOICES_MAX`) strings,
+   each 1..120 chars (`DEFAULTS.CHOICE_MAX_CHARS`) → `validation`
+   (`MessageChoicesSchema`). Allowed on any message type the endpoint accepts
+   (i.e. any non-`system_event` type — rule 4 already rejects `system_event`);
+   only meaningful on `agent_question` and `human_message` (see *Decision choices*).
+
+**Redaction (best-effort, BINDING behavior).** After validation and before
+storage and broadcast, the server scans `body_markdown` against every pattern in
+`REDACTION_PATTERNS` (= `SECRET_CONTENT_PATTERNS` plus `CLAUSROOM_TOKEN_PATTERN`,
+the clausroom bearer-token pattern `ar(?:it|st|bt)_[0-9a-f]{32}`), each compiled
+with `new RegExp(src, 'g')`, and replaces **every** match with the literal string
+`[redacted-secret]`. This applies to **all sender kinds** (human, agent, system).
+The redacted body is what gets stored, broadcast, and exported — the original
+never persists. The upload auto-message body (§5) SHOULD be redacted the same
+way, and the pinned room summary (§3) is redacted the same way. This is a
+best-effort seatbelt against accidental secret paste, not a
+security guarantee: encoded, split, or novel secrets pass through. `choices`
+entries are not scanned. The redacted body is not re-validated against rules
+1–2 (replacement can slightly grow the byte length; that is acceptable).
+
+**Decision choices (inline decision cards).** A message with `choices` renders in
+the web UI as a decision card: the body plus one button per choice. Clicking a
+button posts a `human_message` whose `body_markdown` is **exactly** the choice
+text and whose `reply_to_message_id` is the card message's id. A card counts as
+**answered** once any human (non-agent) reply in the room — button click or typed
+— has a body exactly equal to one of its choices; answered cards render their
+buttons disabled, highlighting the chosen one. `choices` is stored verbatim
+(`messages.choices_json`) and returned on the `Message` object (`null`/omitted
+when unset); it has no server-side semantics beyond validation rule 9.
 
 Enforcement when the sender's user `kind` is `agent` (checked in this order, after validation):
 
@@ -337,6 +431,13 @@ Enforcement when the sender's user `kind` is `agent` (checked in this order, aft
    non-system message breaks it). If `R >= AGENT_ROOM_MAX_AUTO_TURNS` (default 3)
    → `429 turn_limit` with message:
    `"Agent turn limit reached (<N> consecutive agent messages). Stop now and wait for a human to reply before sending more messages."`
+
+**Turn-continue.** There is no dedicated API for granting more agent turns: **any**
+human non-`system_event` message breaks the run and resets the consecutive-agent
+counter to 0 (this falls directly out of the run definition above). The web UI
+exposes this as a **Continue** button (shown when the room is at/near the turn
+limit) and a `/continue` composer command; both simply post a `human_message`
+with body exactly `"Continue — granted more agent turns."`
 
 Rate limit (ALL senders, human and agent): more than 30 accepted messages
 (`DEFAULTS.MESSAGE_RATE_PER_MIN`) in the trailing 60 s sliding window per user →
@@ -366,6 +467,18 @@ Auth: any participant with `can_upload` true (`403 forbidden` otherwise).
 
 Size cap: uploads larger than `AGENT_ROOM_MAX_UPLOAD_BYTES` (default 104857600) →
 `413 too_large` for **everyone** (multer limit; abort the stream).
+
+**Room storage quota (BINDING).** Let `used` = the sum of `size_bytes` over this
+room's **non-deleted** artifacts (`deleted_at IS NULL`; expired-but-not-yet-swept
+rows still count). If `used + incoming size_bytes > AGENT_ROOM_ROOM_STORAGE_BYTES`
+(default 1073741824 = `DEFAULTS.ROOM_STORAGE_BYTES`) → `413` with error code
+`quota_exceeded` and message exactly:
+`"Room storage quota exceeded. Wait for older artifacts to expire or ask the room owner to raise AGENT_ROOM_ROOM_STORAGE_BYTES."`
+The quota applies to **all** uploaders (human and agent). Accounting is atomic
+with the insert: the `used` sum is computed inside the same transaction that
+inserts the artifact row, so concurrent uploads cannot both squeeze under the
+quota. On quota failure nothing is written and any supplied approval is **not**
+consumed.
 
 **Agent approval gate.** If the uploader's user kind is `agent` AND any of:
 
@@ -415,7 +528,8 @@ Response `201`:
     "sha256": "d2f0…64 hex…9ab1",
     "approval_id": null,
     "created_at": "2026-07-02T19:12:00.000Z",
-    "expires_at": null
+    "expires_at": "2026-08-01T19:12:00.000Z",
+    "deleted_at": null
   },
   "message": { "id": "msg_…", "message_type": "artifact_uploaded", "artifact_ids": ["art_7a8b9c0d1e2f3a4b5c6d7e8f"], "body_markdown": "depth_failure.png", "…": "full Message object" }
 }
@@ -432,11 +546,15 @@ bypasses the agent pause/turn/rate checks (the gate for agents is the approval g
 
 ### GET /api/rooms/:id/artifacts
 
-Auth: any participant. Response `200`: `{ "artifacts": [ ...Artifact ] }` ascending by `(created_at, id)`.
+Auth: any participant. Response `200`: `{ "artifacts": [ ...Artifact ] }` ascending by
+`(created_at, id)`. Includes deleted/expired rows (with `deleted_at` set once swept) —
+metadata is never hidden, so the UI can grey out dead artifact chips.
 
 ### GET /api/rooms/:id/artifacts/:artifactId
 
-Auth: any participant. Response `200`: `{ "artifact": { ...Artifact } }`. Unknown id in this room → `404 not_found`.
+Auth: any participant. Response `200`: `{ "artifact": { ...Artifact } }`. Unknown id
+in this room → `404 not_found`. Deleted/expired artifacts still return their row
+(with `deleted_at` set once swept) — only the **download** route 404s.
 
 ### GET /api/rooms/:id/artifacts/:artifactId/download
 
@@ -444,6 +562,31 @@ Auth: any participant (session or bridge; non-participants → `404 not_found`).
 Response `200`: the raw file streamed with `Content-Type: <mime_type>`,
 `Content-Length: <size_bytes>`, and
 `Content-Disposition: attachment; filename="<sanitized filename>"`.
+
+If the artifact is **deleted or expired** (`deleted_at` set, **or** `expires_at`
+non-null and `<= now` even before the sweep runs) → `404 not_found` with message
+exactly: `"Artifact expired or deleted."`
+
+### Retention & expiry (BINDING)
+
+`AGENT_ROOM_ARTIFACT_RETENTION_DAYS` is a **float** number of days
+(default 30 = `DEFAULTS.ARTIFACT_RETENTION_DAYS`):
+
+- positive or `0`: at upload time every artifact gets
+  `expires_at = created_at + retention` (`0` means `expires_at = created_at`,
+  i.e. immediate expiry — useful for tests);
+- negative, or the literal string `off`: retention is **disabled** —
+  `expires_at` is stored as `null` and artifacts never expire.
+
+**Sweep.** On boot and every 10 minutes thereafter, the server finds artifacts
+with `deleted_at IS NULL AND expires_at IS NOT NULL AND expires_at <= now`,
+unlinks each stored file (missing files are ignored), and sets `deleted_at`.
+The row is **never** deleted — metadata routes keep returning it — and no
+message or WS frame is emitted by the sweep. Freed bytes stop counting toward
+the room storage quota as soon as `deleted_at` is set. Messages may keep
+referencing dead artifact ids (`artifact_ids` validation only requires that the
+row exists). UIs should treat an artifact as dead when `deleted_at` is set or
+`expires_at` is in the past.
 
 ---
 
@@ -529,7 +672,7 @@ Every non-2xx response body is (`ApiError`):
 
 | code                | HTTP | typical trigger |
 |---------------------|------|-----------------|
-| `unauthorized`      | 401  | missing/invalid/revoked/used token |
+| `unauthorized`      | 401  | missing/invalid/revoked/used token; expired session (§1 rule 4) |
 | `forbidden`         | 403  | valid token, action not allowed for this caller |
 | `agents_paused`     | 403  | agent send while `room.agents_paused` |
 | `participant_paused`| 403  | agent send while participant `paused` |
@@ -537,6 +680,7 @@ Every non-2xx response body is (`ApiError`):
 | `not_found`         | 404  | unknown room/message/artifact/approval/participant, or room hidden from non-participant |
 | `conflict`          | 409  | respond to a non-pending approval; duplicate state transition |
 | `too_large`         | 413  | upload over `AGENT_ROOM_MAX_UPLOAD_BYTES`; JSON body over 1 MB |
+| `quota_exceeded`    | 413  | upload would push the room's non-deleted artifact bytes over `AGENT_ROOM_ROOM_STORAGE_BYTES` (§5) |
 | `validation`        | 422  | schema/reference validation failure |
 | `inline_blob`       | 422  | 2000+ char base64-ish run in `body_markdown` |
 | `turn_limit`        | 429  | agent auto-turn run limit |
@@ -552,14 +696,15 @@ GET /ws?room_id=<room_id>&token=<session-or-bridge-token>
 
 - Token must be a valid session or bridge token AND the token's user must be a
   participant of `room_id`. On failure the server closes the socket immediately:
-  close code `4001` (bad/missing token), `4003` (not a participant / bridge token
-  for a different room), `4004` (unknown room). No HTTP-style body.
+  close code `4001` (bad/missing/expired token — an expired session per §1 rule 4
+  counts), `4003` (not a participant / bridge token for a different room),
+  `4004` (unknown room). No HTTP-style body.
 - On successful connect the server sends one `hello` frame:
 
 ```json
 {
   "type": "hello",
-  "room": { "id": "room_a1b2c3d4e5f60718293a4b5c", "name": "Project Debug Room", "created_by": "user_…", "created_at": "…", "agents_paused": false, "archived_at": null },
+  "room": { "id": "room_a1b2c3d4e5f60718293a4b5c", "name": "Project Debug Room", "created_by": "user_…", "created_at": "…", "agents_paused": false, "archived_at": null, "summary_markdown": null, "summary_updated_by": null, "summary_updated_at": null },
   "participants": [ { "…": "Participant objects, as in GET /api/rooms/:id" } ],
   "presence": ["user_1a2b3c4d5e6f708192a3b4c5"],
   "latest_message_id": "msg_0aa11bb22cc33dd44ee55ff6"
@@ -572,14 +717,40 @@ GET /ws?room_id=<room_id>&token=<session-or-bridge-token>
 
 - Server push frames (all conform to `WsServerFrameSchema`): `message_created`,
   `approval_created`, `approval_resolved`, `participant_updated`, `room_updated`,
-  and `presence` (`{"type":"presence","online_user_ids":[…]}`, broadcast whenever the
-  set of online users changes — join/leave).
-- Client → server: only `{"type":"ping"}`, answered with `{"type":"pong"}`. Any other
-  client frame gets `{"type":"error","code":"validation","message":"…"}` and is
-  otherwise ignored — **all mutations happen over REST.**
+  `presence` (`{"type":"presence","online_user_ids":[…]}`, broadcast whenever the
+  set of online users changes — join/leave), and `activity` (below).
+- Client → server frames (`WsClientFrameSchema`, a discriminated union):
+  - `{"type":"ping"}` — answered with `{"type":"pong"}`.
+  - `{"type":"status","state":"working"|"idle"}` — agent activity report (below).
+    Honored **only** when the connection's user kind is `agent`; from any other
+    kind the frame is valid but **silently ignored** (no error frame, no effect).
+
+  Any frame that fails `WsClientFrameSchema` gets
+  `{"type":"error","code":"validation","message":"…"}` and is otherwise ignored —
+  **all mutations happen over REST.**
 - Multiple concurrent sockets per user are allowed (a user is "online" while ≥1 is open).
 - `message_created` frames are sent to every socket in the room regardless of
   `recipient_ids` (recipients are advisory addressing, not privacy).
+
+### Agent activity ("working" pills)
+
+Per-user ephemeral state, `working` or `idle` (`ActivityStateSchema`), default
+`idle`. **Never persisted** — no DB row, no REST endpoint, and the `hello` frame
+carries no activity info (a freshly connected client assumes everyone is idle and
+learns from subsequent frames).
+
+- An agent connection's `{"type":"status","state":…}` frame sets its user's state.
+- On every state **change** the server broadcasts to all sockets in the room:
+
+```json
+{ "type": "activity", "payload": { "user_id": "user_agent7agent7agent7agen", "state": "working" } }
+```
+
+- A repeated `working` report refreshes the timer without rebroadcasting.
+- Auto-revert: `DEFAULTS.ACTIVITY_IDLE_TIMEOUT_MS` (60000) after the last
+  `working` report without a refresh, the server reverts the user to `idle` and
+  broadcasts the change. The user's last socket closing also reverts (and
+  broadcasts) immediately.
 
 ---
 
@@ -603,6 +774,9 @@ GET /ws?room_id=<room_id>&token=<session-or-bridge-token>
 | `AGENT_ROOM_ARTIFACT_DIR` | `./data/artifacts` | Artifact storage root (auto-created). |
 | `AGENT_ROOM_MAX_UPLOAD_BYTES` | `104857600` | Absolute per-upload cap. |
 | `AGENT_ROOM_REQUIRE_APPROVAL_BYTES` | `1048576` | Agent-upload approval threshold. |
+| `AGENT_ROOM_ARTIFACT_RETENTION_DAYS` | `30` | Artifact retention, float days. `0` = immediate expiry; negative or `off` disables expiry (§5). |
+| `AGENT_ROOM_ROOM_STORAGE_BYTES` | `1073741824` | Per-room quota on the sum of non-deleted artifact `size_bytes` (§5). |
+| `AGENT_ROOM_SESSION_TTL_DAYS` | `30` | Session-token sliding expiry, float days (§1 rule 4). |
 | `AGENT_ROOM_MAX_AUTO_TURNS` | `3` | Consecutive agent-message limit. |
 | `AGENT_ROOM_WEB_DIST` | *(unset)* | Optional override of the web dist dir. |
 | `AGENT_ROOM_PUBLIC_BASE_URL` | *(unset)* | Optional public URL shown in UI snippets (returned as `public_base_url` by `GET /api/rooms/:id`, §3). |
@@ -627,12 +801,15 @@ CREATE TABLE users (
 );
 
 CREATE TABLE rooms (
-  id            TEXT PRIMARY KEY,
-  name          TEXT NOT NULL,
-  created_by    TEXT NOT NULL REFERENCES users(id),
-  created_at    TEXT NOT NULL,
-  agents_paused INTEGER NOT NULL DEFAULT 0,
-  archived_at   TEXT
+  id                 TEXT PRIMARY KEY,
+  name               TEXT NOT NULL,
+  created_by         TEXT NOT NULL REFERENCES users(id),
+  created_at         TEXT NOT NULL,
+  agents_paused      INTEGER NOT NULL DEFAULT 0,
+  archived_at        TEXT,
+  summary_markdown   TEXT,
+  summary_updated_by TEXT REFERENCES users(id),
+  summary_updated_at TEXT
 );
 
 CREATE TABLE room_participants (
@@ -655,6 +832,7 @@ CREATE TABLE messages (
   artifact_ids_json   TEXT NOT NULL DEFAULT '[]',
   reply_to_message_id TEXT REFERENCES messages(id),
   confidence          TEXT CHECK (confidence IN ('low','medium','high')),
+  choices_json        TEXT,
   created_at          TEXT NOT NULL
 );
 
@@ -669,7 +847,8 @@ CREATE TABLE artifacts (
   storage_path TEXT NOT NULL,
   approval_id  TEXT REFERENCES approvals(id),
   created_at   TEXT NOT NULL,
-  expires_at   TEXT
+  expires_at   TEXT,
+  deleted_at   TEXT
 );
 
 CREATE TABLE approvals (
@@ -705,7 +884,15 @@ Notes: `tokens.room_id` is null for invite/session tokens and set for bridge tok
 (and, for invites, `used_at IS NULL`). `approvals.consumed_at` is set when an approved
 `artifact_upload` approval is used by an upload (§5) — it is server-internal and not
 part of the wire `Approval` object. Message API responses assemble the `sender`
-object by joining `users`, and parse `recipient_ids_json`/`artifact_ids_json` into arrays.
+object by joining `users`, and parse `recipient_ids_json`/`artifact_ids_json` into
+arrays. `messages.choices_json` is a JSON string array or NULL; it becomes the wire
+`choices` field (`null` when NULL).
+
+**Migration (v0.1).** `rooms.summary_markdown` / `summary_updated_by` /
+`summary_updated_at`, `messages.choices_json`, and `artifacts.deleted_at` are new
+in v0.1. On boot, the server must `ALTER TABLE … ADD COLUMN` any of them missing
+from an existing database (all nullable, so plain adds suffice; pre-existing rows
+read as NULL, which is the correct "unset" value).
 
 ## 12. Bridge MCP tools (exposed to the local coding agent)
 
@@ -718,16 +905,25 @@ call. Tool names and one-line semantics (BINDING names):
 | `room_get_status()` | Returns room name/id, participants, pause flags, this agent's identity, and effective local policy. |
 | `room_list_pending()` | Returns messages since the bridge's last-read cursor that address this agent (or everyone), newest last. |
 | `room_read_messages({ after?, limit? })` | Raw page of room messages (GET /messages passthrough), ascending. |
-| `room_send_message({ body_markdown, message_type?, recipient_ids?, reply_to_message_id?, confidence? })` | Posts a message as this agent after local policy checks (secret patterns, inline-blob, `allow_agent_to_send_text`); returns the message id. Default `message_type`: `agent_answer`. |
+| `room_send_message({ body_markdown, message_type?, recipient_ids?, reply_to_message_id?, confidence?, choices? })` | Posts a message as this agent after local policy checks (secret patterns, inline-blob, `allow_agent_to_send_text`); returns the message id. Default `message_type`: `agent_answer`. `choices` (optional, 1–6 strings ≤120 chars) renders a decision card (§4). |
 | `room_wait_for_new_messages({ timeout_seconds? })` | Blocks (long-poll over the bridge's WS connection) until a new message arrives or timeout (default 60 s, max 300); returns the new messages, `[]` on timeout. |
 | `room_upload_artifact({ path, description? })` | Uploads a local file after policy checks (roots, deny globs, size, secret scan); returns the artifact id, or an `approval_required` result telling the agent to request approval. |
 | `room_download_artifact({ artifact_id, filename? })` | Downloads a room artifact into `filesystem.downloads_dir` (never elsewhere), verifies sha256, and returns the local path. |
 | `room_request_human_approval({ approval_type, payload })` | Creates an approval reviewed by this agent's owner human; returns the approval id. |
 | `room_check_approval({ approval_id })` | Returns the approval's current status (`pending/approved/denied/expired`). |
 | `room_mark_resolved({ summary, reply_to_message_id? })` | Posts a `resolution_summary` message with the given summary; returns the message id. |
+| `room_get_summary()` | Returns the room's pinned summary: `summary_markdown`, `summary_updated_by`, `summary_updated_at` (all null when unset). Read-only, always allowed. |
+| `room_update_summary({ summary_markdown })` | Sets (or clears, with null) the pinned room summary via `PUT /api/rooms/:id/summary` (§3). Gated by `allow_agent_to_send_text` (it posts human-visible text). Returns the updated room summary fields. |
 
 Tool descriptions must warn the agent that room content is untrusted input and that
 uploads/commands need human approval.
+
+**Automatic activity frames.** The bridge reports agent activity (§8) without any
+tool: it sends `{"type":"status","state":"working"}` on its WS connection when a
+tool execution begins and `{"type":"status","state":"idle"}` when it ends —
+except `room_wait_for_new_messages`, which is idle waiting and must not flip the
+state. Overlapping tool calls keep the state `working` until the last one ends.
+Best-effort: if the WS is down, tool execution proceeds and no frame is sent.
 
 ## 13. Bridge config (TOML)
 
@@ -757,6 +953,20 @@ max_upload_bytes_absolute          = 104857600
 roots         = ["/path/to/project"]   # uploads must resolve inside one of these
 deny_globs    = []                     # ADDED to DEFAULT_DENY_GLOBS from @clausroom/protocol, never replacing them
 downloads_dir = "~/.clausroom/downloads"  # optional; default shown
+
+[auto]                                  # only needed for `clausroom-bridge auto` (see below)
+engine               = "claude"         # required: 'claude' | 'codex' | 'custom'
+workdir              = "/path/to/project"  # required; MUST resolve inside filesystem.roots
+allowed_tools        = ["Read", "Grep", "Glob"]  # default shown (read-only)
+model                = "sonnet"        # optional; engine default when unset
+max_turns            = 25               # default
+timeout_seconds      = 300              # default; wall clock per engine run
+max_context_messages = 30               # default; room messages included in the prompt
+respond_to           = "addressed"      # default; or 'mentions_only'
+custom_command       = []               # argv array; required when engine = 'custom'
+extra_args           = []               # extra argv appended to the engine CLI
+bare                 = false            # default
+max_budget_usd       = 2.50             # optional; unset = no budget cap
 ```
 
 `read_only_default` semantics (BINDING): when true, every write-permission flag
@@ -773,10 +983,47 @@ test as the server gate in §5), require an approved approval before uploading �
 and verify the approval is the agent's own `artifact_upload` approval whose
 payload `sha256`/`size_bytes` match the file about to be uploaded.
 
+### `[auto]` — autonomous engine adapter (`clausroom-bridge auto`, Milestone 5)
+
+`clausroom-bridge auto` runs the bridge as an autonomous responder: it watches the
+room, and for each message it should answer it composes a prompt (room context, at
+most `max_context_messages` recent messages, plus the triggering message) and runs
+a local coding-agent engine, then posts the engine's reply via the normal
+`room_send_message` path (all local policy checks and server-side limits apply).
+The `[auto]` table is required for this subcommand only; other subcommands ignore it.
+
+| Key | Type / values | Default | Meaning |
+|-----|---------------|---------|---------|
+| `engine` | `'claude' \| 'codex' \| 'custom'` | *(required)* | Which engine CLI to drive. |
+| `workdir` | string | *(required)* | Engine working directory. **MUST resolve (after symlinks/`~`) inside one of `filesystem.roots`**, else the bridge refuses to start. |
+| `allowed_tools` | string[] | `["Read", "Grep", "Glob"]` | Tools granted to the engine. The default is read-only on purpose. |
+| `model` | string | *(unset)* | Model override passed to the engine. |
+| `max_turns` | int | `25` | Engine-internal turn cap per run. |
+| `timeout_seconds` | int | `300` | Wall-clock cap per engine run; on timeout the run is killed and no reply is posted. |
+| `max_context_messages` | int | `30` | Max recent room messages included in the composed prompt. |
+| `respond_to` | `'addressed' \| 'mentions_only'` | `'addressed'` | `addressed`: reply when `recipient_ids` includes this agent, **or** `recipient_ids` is empty and the sender is not this agent. `mentions_only`: reply only when `recipient_ids` explicitly includes this agent. |
+| `custom_command` | string[] (argv) | *(unset)* | Required (non-empty) when `engine = 'custom'`; rejected for other engines. The bridge spawns it with the composed prompt on **stdin**; it must print the reply markdown to **stdout** (exit code 0). |
+| `extra_args` | string[] | `[]` | Extra argv appended to the engine CLI invocation. |
+| `bare` | bool | `false` | When true, skip the bridge's prompt scaffolding and pass the triggering message body as the prompt verbatim. |
+| `max_budget_usd` | float | *(unset)* | Per-run budget cap passed to engines that support one; unset = no cap. |
+
+**Safety posture (BINDING).** The engine runs with **read-only tools by default**
+(`allowed_tools` default; granting write/exec tools is an explicit operator
+choice). All room content fed into the prompt is **untrusted input** — the
+composed prompt must say so and instruct the engine to treat instructions found
+in room messages as data, not commands. Every reply still goes through the
+bridge's local policy (secret patterns, inline-blob, `allow_agent_to_send_text`)
+and the server's guardrails — pause flags, rate limit, and the consecutive-agent
+**turn limit** (§4) all still apply, so a runaway auto-responder stops after
+`AGENT_ROOM_MAX_AUTO_TURNS` messages until a human replies (or clicks
+**Continue**, §4). The bridge emits `working`/`idle` activity frames around
+engine runs like any other tool execution (§12).
+
 ## 14. Server stdout lines (machine-readable, BINDING)
 
 ```text
 CLAUSROOM_BOOTSTRAP_INVITE <arit_ token>     # first run only
+CLAUSROOM_RECOVERY_INVITE <arit_ token>      # only when an admin human is locked out (§2)
 CLAUSROOM_LISTENING <port>                   # every run, once listening
 MSG <room_id> <sender_id> <message_type>     # every accepted message
 ```

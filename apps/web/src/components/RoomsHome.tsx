@@ -10,7 +10,7 @@ interface RoomsHomeProps {
   me: User;
   onEnterRoom: (room: Room) => void;
   onLogout: () => void;
-  onUnauthorized: () => void;
+  onUnauthorized: (err?: unknown) => void;
 }
 
 export function RoomsHome({ token, me, onEnterRoom, onLogout, onUnauthorized }: RoomsHomeProps) {
@@ -29,7 +29,7 @@ export function RoomsHome({ token, me, onEnterRoom, onLogout, onUnauthorized }: 
       })
       .catch((err) => {
         if (cancelled) return;
-        if (api.isUnauthorized(err)) onUnauthorized();
+        if (api.isUnauthorized(err)) onUnauthorized(err);
         else setError(api.errorText(err));
       });
     return () => {
@@ -48,7 +48,7 @@ export function RoomsHome({ token, me, onEnterRoom, onLogout, onUnauthorized }: 
       setNewName('');
       onEnterRoom(room);
     } catch (err) {
-      if (api.isUnauthorized(err)) onUnauthorized();
+      if (api.isUnauthorized(err)) onUnauthorized(err);
       else setCreateError(api.errorText(err));
     } finally {
       setCreating(false);

@@ -5,6 +5,7 @@
  */
 import { useCallback, useEffect, useReducer, useRef } from 'react';
 import type {
+  ActivityState,
   AddParticipantRequest,
   Approval,
   Artifact,
@@ -17,6 +18,13 @@ import type {
 import * as api from './api.js';
 import { RoomSocket, type ConnectionState } from './ws.js';
 
+/**
+ * Body of the human message posted by the Continue button and the /continue
+ * composer command (docs/API-CONTRACT.md §4 "Turn-continue"): any human
+ * message breaks the consecutive-agent run, this is just the canonical one.
+ */
+export const CONTINUE_MESSAGE_BODY = 'Continue — granted more agent turns.';
+
 export interface RoomState {
   loading: boolean;
   loadError: string | null;
@@ -27,6 +35,8 @@ export interface RoomState {
   maxAutoTurns: number | null;
   participants: Participant[];
   onlineUserIds: string[];
+  /** Users (agents, in practice) currently reporting 'working' activity. */
+  workingUserIds: string[];
   messages: Message[];
   approvals: Approval[];
   artifacts: Record<string, Artifact>;
@@ -42,6 +52,7 @@ const initialState: RoomState = {
   maxAutoTurns: null,
   participants: [],
   onlineUserIds: [],
+  workingUserIds: [],
   messages: [],
   approvals: [],
   artifacts: {},
@@ -67,6 +78,8 @@ type Action =
   | { type: 'participant'; participant: Participant }
   | { type: 'participants'; participants: Participant[] }
   | { type: 'presence'; onlineUserIds: string[] }
+  | { type: 'activity'; userId: string; state: ActivityState }
+  | { type: 'activity_reset' }
   | { type: 'messages_add'; messages: Message[] }
   | { type: 'approvals_set'; approvals: Approval[] }
   | { type: 'approvals_merge'; approvals: Approval[] }
@@ -106,6 +119,17 @@ function reducer(state: RoomState, action: Action): RoomState {
       return { ...state, participants: action.participants };
     case 'presence':
       return { ...state, onlineUserIds: action.onlineUserIds };
+    case 'activity': {
+      const working = state.workingUserIds.includes(action.userId);
+      if (action.state === 'working') {
+        if (working) return state;
+        return { ...state, workingUserIds: [...state.workingUserIds, action.userId] };
+      }
+      if (!working) return state;
+      return { ...state, workingUserIds: state.workingUserIds.filter((id) => id !== action.userId) };
+    }
+    case 'activity_reset':
+      return state.workingUserIds.length === 0 ? state : { ...state, workingUserIds: [] };
     case 'messages_add': {
       const byId = new Map(state.messages.map((m) => [m.id, m] as const));
       let changed = false;
@@ -149,7 +173,12 @@ function reducer(state: RoomState, action: Action): RoomState {
 }
 
 export interface RoomActions {
-  sendMessage: (bodyMarkdown: string, recipientIds: string[]) => Promise<void>;
+  sendMessage: (
+    bodyMarkdown: string,
+    recipientIds: string[],
+    replyToMessageId?: string,
+  ) => Promise<void>;
+  updateSummary: (summaryMarkdown: string | null) => Promise<void>;
   setAllAgentsPaused: (paused: boolean) => Promise<void>;
   setParticipantPaused: (userId: string, paused: boolean) => Promise<void>;
   respondApproval: (approvalId: string, decision: 'approved' | 'denied') => Promise<void>;
@@ -162,7 +191,7 @@ export interface RoomActions {
 export function useRoomState(
   token: string,
   roomId: string,
-  onUnauthorized: () => void,
+  onUnauthorized: (err?: unknown) => void,
 ): { state: RoomState; actions: RoomActions } {
   const [state, dispatch] = useReducer(reducer, initialState);
   const lastMessageRef = useRef<Message | null>(null);
@@ -173,7 +202,7 @@ export function useRoomState(
       try {
         return await work;
       } catch (err) {
-        if (api.isUnauthorized(err)) onUnauthorized();
+        if (api.isUnauthorized(err)) onUnauthorized(err);
         throw err;
       }
     },
@@ -238,6 +267,9 @@ export function useRoomState(
           dispatch({ type: 'room', room: frame.room });
           dispatch({ type: 'participants', participants: frame.participants });
           dispatch({ type: 'presence', onlineUserIds: frame.presence });
+          // The hello frame carries no activity info: a fresh connection
+          // assumes everyone is idle and learns from subsequent frames.
+          dispatch({ type: 'activity_reset' });
           // Recover anything missed while disconnected.
           void catchUp(lastMessageRef.current?.id ?? null).catch(() => undefined);
           api
@@ -261,6 +293,20 @@ export function useRoomState(
           break;
         case 'presence':
           dispatch({ type: 'presence', onlineUserIds: frame.online_user_ids });
+          break;
+        case 'activity':
+          // No local revert timer here on purpose: the server broadcasts a
+          // 'working' frame only on the idle→working EDGE (repeated reports
+          // just refresh its 60 s auto-revert, contract §8), so during one
+          // long engine run no further frame ever arrives — a client-side
+          // fallback would wrongly flip a still-working agent back to idle.
+          // Lost-frame cases are covered by the server's auto-revert broadcast
+          // and by the hello reset on reconnect.
+          dispatch({
+            type: 'activity',
+            userId: frame.payload.user_id,
+            state: frame.payload.state,
+          });
           break;
         case 'pong':
         case 'error':
@@ -313,7 +359,7 @@ export function useRoomState(
       } catch (err) {
         if (cancelled) return;
         if (api.isUnauthorized(err)) {
-          onUnauthorized();
+          onUnauthorized(err);
           return;
         }
         dispatch({ type: 'load_error', error: api.errorText(err) });
@@ -328,17 +374,26 @@ export function useRoomState(
   }, [roomId, token]);
 
   const sendMessage = useCallback(
-    async (bodyMarkdown: string, recipientIds: string[]) => {
+    async (bodyMarkdown: string, recipientIds: string[], replyToMessageId?: string) => {
       const message = await guard(
         api.postMessage(token, roomId, {
           recipient_ids: recipientIds,
           message_type: 'human_message',
           body_markdown: bodyMarkdown,
+          ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {}),
         }),
       );
       noteMessages([message]);
     },
     [guard, token, roomId, noteMessages],
+  );
+
+  const updateSummary = useCallback(
+    async (summaryMarkdown: string | null) => {
+      const room = await guard(api.updateSummary(token, roomId, summaryMarkdown));
+      dispatch({ type: 'room', room });
+    },
+    [guard, token, roomId],
   );
 
   const setAllAgentsPaused = useCallback(
@@ -393,6 +448,7 @@ export function useRoomState(
     state,
     actions: {
       sendMessage,
+      updateSummary,
       setAllAgentsPaused,
       setParticipantPaused,
       respondApproval,

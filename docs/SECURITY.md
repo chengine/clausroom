@@ -55,6 +55,16 @@ Three bearer-token kinds, distinguishable by prefix (`TOKEN_PREFIXES` in
   effect on the next request.
 - Bridge tokens are never written to config files: `bridge.toml` names an
   environment variable (`token_env`, default `AGENT_ROOM_BRIDGE_TOKEN`).
+- **Owner-lockout recovery.** Session TTL expiry could otherwise brick a
+  deployment: minting a fresh invite requires an authenticated owner session —
+  exactly what an idle owner just lost. On startup, if an **admin human** (the
+  bootstrap Host) holds no usable credential at all (every invite used or
+  revoked, every session revoked or TTL-expired), the server mints a fresh
+  single-use invite for them and prints it once to stdout as
+  `CLAUSROOM_RECOVERY_INVITE arit_…`. Recovery therefore requires restarting
+  the server process (i.e. shell access to the host machine) — a remote guest
+  cannot trigger it. Non-admin humans still need the room owner to rotate
+  their token.
 
 ## Artifact policy
 
@@ -105,6 +115,12 @@ Three bearer-token kinds, distinguishable by prefix (`TOKEN_PREFIXES` in
 
 ## What is NOT enforced (honest gaps)
 
+Three MVP gaps are closed as of v0.1 and are no longer on this list: artifacts
+now expire and count against a per-room storage quota (`AGENT_ROOM_ARTIFACT_RETENTION_DAYS`,
+`AGENT_ROOM_ROOM_STORAGE_BYTES`); session tokens now slide-expire
+(`AGENT_ROOM_SESSION_TTL_DAYS`); and message bodies are now redacted against
+the shared secret patterns. What remains:
+
 - **No TLS in the app itself.** The server speaks plain HTTP on loopback;
   Tailscale Serve provides TLS and tailnet-only exposure. If you bind to
   `0.0.0.0` without Serve (as inside the Docker container), traffic on that hop
@@ -112,21 +128,35 @@ Three bearer-token kinds, distinguishable by prefix (`TOKEN_PREFIXES` in
 - **Network posture is operator-enforced.** Nothing in the code can verify you
   used device sharing instead of a tailnet invite, applied the grants file, or
   avoided Funnel. Run the policy `tests` and the spec's verification checklist.
-- **Session tokens do not expire** in the MVP; they are only revocable (rotation).
+- **Message redaction is best-effort pattern matching.** Message bodies and
+  the pinned room summary are scanned against `SECRET_CONTENT_PATTERNS` plus
+  the clausroom token pattern (`arit_/arst_/arbt_` + 32 hex) and matches
+  become `[redacted-secret]`, but encoded, split, or novel secret formats pass
+  through untouched. It is a seatbelt against accidental paste, not a security
+  guarantee — still do not paste secrets into chat. `choices` entries are not
+  scanned.
+- **Secret scanning of uploads is likewise best-effort** (name globs + content
+  regexes on the first 1 MiB of text files). Novel secret formats, binary
+  encodings, or encrypted blobs will not be caught. Human review of uploads is
+  the real gate.
 - **Approval `payload` binding covers content, not intent.** The server verifies
   the uploaded bytes match the approval payload's `sha256`/`size_bytes` and
   consumes the approval after one upload, but the `path`/`description` fields
   remain advisory — the reviewing human should still read them.
-- **Secret scanning is best-effort pattern matching** (name globs + content
-  regexes on the first 1 MiB of text files). Novel secret formats, binary
-  encodings, or encrypted blobs will not be caught. Human review of uploads is
-  the real gate.
+- **Activity pills are cosmetic.** `working`/`idle` frames are self-reported by
+  each bridge, never persisted, and enforce nothing — an agent that lies about
+  being idle loses nothing and gains nothing. Do not treat them as an audit
+  signal; the message log is the audit signal.
+- **The auto-responder trusts its local engine.** `clausroom-bridge auto`
+  spawns whatever engine CLI the *local* config names and posts its output; the
+  server cannot tell an autonomous reply from a human-supervised one. Its real
+  constraints are the read-only tool allowlist (default `Read`/`Grep`/`Glob` —
+  widening it is the operator's explicit choice), the bridge's local policy on
+  every outgoing message, and the server's guardrails (pause flags, rate limit,
+  and the consecutive-agent turn limit), which bind it exactly like any other
+  agent. Room content fed into the engine is untrusted input; see
+  `THREAT_MODEL.md` for the prompt-injection analysis.
 - **Humans are trusted within their permissions.** A human participant can post
   anything their `can_send`/`can_upload` flags allow, including through the
   browser bypassing all bridge policy — the bridge constrains *agents*, not
   people.
-- **No per-room storage quota or artifact retention sweep yet** (`expires_at`
-  exists in the schema but nothing cleans up); a cooperative-but-verbose agent
-  can fill the disk 100 MiB at a time, subject to approvals.
-- **No redaction of token-like strings in message bodies** beyond the inline-blob
-  guard; do not paste raw tokens into chat.

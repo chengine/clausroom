@@ -1,0 +1,56 @@
+name: Bug report
+description: Something in the server, web UI, or bridge is broken.
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+      placeholder: |
+        1. Started the server with ...
+        2. Ran `clausroom-bridge mcp ...`
+        3. Expected ... but got ...
+    validations:
+      required: true
+  - type: input
+    id: server-version
+    attributes:
+      label: Server version
+      description: clausroom version/commit on the server machine (e.g. `v0.1.0` or a commit SHA).
+      placeholder: v0.1.0
+    validations:
+      required: true
+  - type: input
+    id: bridge-version
+    attributes:
+      label: Bridge version
+      description: clausroom-bridge version/commit, if a bridge is involved (or "n/a").
+      placeholder: v0.1.0
+    validations:
+      required: false
+  - type: input
+    id: os
+    attributes:
+      label: Operating system(s)
+      description: OS and version of the affected machine(s), e.g. "Ubuntu 24.04 (server), macOS 15 (bridge)".
+      placeholder: Ubuntu 24.04
+    validations:
+      required: true
+  - type: input
+    id: node-version
+    attributes:
+      label: Node.js version
+      placeholder: "22.x"
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs / output
+      description: >
+        Server stdout, bridge stderr, or browser console output.
+        Redact any tokens (arit_/arst_/arbt_) before pasting.
+      render: text
+    validations:
+      required: false

@@ -49,6 +49,7 @@ export const ERROR_CODES = [
   'inline_blob',
   'rate_limited',
   'too_large',
+  'quota_exceeded',
   'conflict',
 ] as const;
 export type ErrorCode = (typeof ERROR_CODES)[number];
@@ -71,6 +72,27 @@ export const DEFAULTS = {
   MAX_BODY_CHARS: 32000,
   /** Pending approvals older than this are treated as expired (1 hour). */
   APPROVAL_TTL_MS: 3600000,
+  /**
+   * AGENT_ROOM_ARTIFACT_RETENTION_DAYS — artifact retention in days (float).
+   * 0 = immediate expiry; negative or the string 'off' disables retention
+   * (artifacts never expire; expires_at is null).
+   */
+  ARTIFACT_RETENTION_DAYS: 30,
+  /** AGENT_ROOM_ROOM_STORAGE_BYTES — per-room artifact storage quota (1 GiB). */
+  ROOM_STORAGE_BYTES: 1073741824,
+  /** AGENT_ROOM_SESSION_TTL_DAYS — session-token sliding expiry in days (float). */
+  SESSION_TTL_DAYS: 30,
+  /** Max characters in Room.summary_markdown. */
+  SUMMARY_MAX_CHARS: 4000,
+  /** Max entries in Message.choices. */
+  CHOICES_MAX: 6,
+  /** Max characters per Message.choices entry. */
+  CHOICE_MAX_CHARS: 120,
+  /**
+   * Agent activity ('working' pill) auto-reverts to idle after this many ms
+   * without a refreshing {type:'status'} WS frame.
+   */
+  ACTIVITY_IDLE_TIMEOUT_MS: 60000,
 } as const;
 
 /**
@@ -90,6 +112,23 @@ export const SECRET_CONTENT_PATTERNS: readonly string[] = [
   'ghp_',
   'github_pat_',
   'sk-[^\\s]{8,}',
+];
+
+/**
+ * Regex SOURCE matching any raw clausroom bearer token (invite/session/bridge):
+ * `ar(it|st|bt)_` + 32 lowercase hex chars. Compile with `new RegExp(src, 'g')`.
+ */
+export const CLAUSROOM_TOKEN_PATTERN = 'ar(?:it|st|bt)_[0-9a-f]{32}';
+
+/**
+ * Redaction regex SOURCES applied by the server to `body_markdown` of every
+ * posted message (all sender kinds) BEFORE storage and broadcast: each match is
+ * replaced with the literal string `[redacted-secret]`. Best-effort — this is a
+ * seatbelt, not a guarantee. Compile each with `new RegExp(src, 'g')`.
+ */
+export const REDACTION_PATTERNS: readonly string[] = [
+  ...SECRET_CONTENT_PATTERNS,
+  CLAUSROOM_TOKEN_PATTERN,
 ];
 
 /**

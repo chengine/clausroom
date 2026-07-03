@@ -20,6 +20,20 @@ const EnvSchema = z.object({
     .int()
     .nonnegative()
     .default(DEFAULTS.REQUIRE_APPROVAL_BYTES),
+  /**
+   * Float days; 0 = immediate expiry (tests); negative or the literal string
+   * 'off' disables retention (docs/API-CONTRACT.md §5).
+   */
+  AGENT_ROOM_ARTIFACT_RETENTION_DAYS: z
+    .union([z.literal('off'), z.coerce.number()])
+    .default(DEFAULTS.ARTIFACT_RETENTION_DAYS),
+  AGENT_ROOM_ROOM_STORAGE_BYTES: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(DEFAULTS.ROOM_STORAGE_BYTES),
+  /** Float days for the session-token sliding expiry (docs/API-CONTRACT.md §1). */
+  AGENT_ROOM_SESSION_TTL_DAYS: z.coerce.number().positive().default(DEFAULTS.SESSION_TTL_DAYS),
   AGENT_ROOM_MAX_AUTO_TURNS: z.coerce.number().int().positive().default(DEFAULTS.MAX_AUTO_TURNS),
   AGENT_ROOM_WEB_DIST: z.string().min(1).optional(),
   AGENT_ROOM_PUBLIC_BASE_URL: z.string().min(1).optional(),
@@ -32,6 +46,12 @@ export interface ServerConfig {
   artifactDir: string;
   maxUploadBytes: number;
   requireApprovalBytes: number;
+  /** Artifact retention in float days; null when disabled ('off' or negative). */
+  artifactRetentionDays: number | null;
+  /** Per-room quota on the sum of non-deleted artifact size_bytes. */
+  roomStorageBytes: number;
+  /** Session-token sliding expiry in float days. */
+  sessionTtlDays: number;
   maxAutoTurns: number;
   webDist: string | undefined;
   publicBaseUrl: string | undefined;
@@ -51,6 +71,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): ServerConfig {
     throw new Error(`Invalid AGENT_ROOM_* environment: ${issues}`);
   }
   const e = parsed.data;
+  const retention = e.AGENT_ROOM_ARTIFACT_RETENTION_DAYS;
   return {
     host: e.AGENT_ROOM_HOST,
     port: e.AGENT_ROOM_PORT,
@@ -58,6 +79,9 @@ export function loadConfig(env: NodeJS.ProcessEnv): ServerConfig {
     artifactDir: e.AGENT_ROOM_ARTIFACT_DIR,
     maxUploadBytes: e.AGENT_ROOM_MAX_UPLOAD_BYTES,
     requireApprovalBytes: e.AGENT_ROOM_REQUIRE_APPROVAL_BYTES,
+    artifactRetentionDays: retention === 'off' || retention < 0 ? null : retention,
+    roomStorageBytes: e.AGENT_ROOM_ROOM_STORAGE_BYTES,
+    sessionTtlDays: e.AGENT_ROOM_SESSION_TTL_DAYS,
     maxAutoTurns: e.AGENT_ROOM_MAX_AUTO_TURNS,
     webDist: e.AGENT_ROOM_WEB_DIST,
     publicBaseUrl: e.AGENT_ROOM_PUBLIC_BASE_URL,

@@ -1,4 +1,16 @@
 /** Small formatting helpers shared across the UI. */
+import type { Artifact } from '@clausroom/protocol';
+
+/**
+ * Dead = the retention sweep deleted the file, or it is past its expiry
+ * (either way the download route 404s with "Artifact expired or deleted.").
+ */
+export function isArtifactDead(artifact: Artifact): boolean {
+  if (artifact.deleted_at) return true;
+  if (!artifact.expires_at) return false;
+  const expires = Date.parse(artifact.expires_at);
+  return Number.isFinite(expires) && expires <= Date.now();
+}
 
 export function humanSize(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return '?';

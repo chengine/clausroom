@@ -8,6 +8,10 @@
  *                           go to stderr.
  *   check --config <path>   Connectivity/config test: /healthz, authenticated
  *                           GET room, print a summary, exit 0/1.
+ *   auto  --config <path>   Autonomous responder: watch the room and answer
+ *                           messages addressed to this agent by driving a
+ *                           local engine (claude | codex [EXPERIMENTAL] |
+ *                           custom) per the [auto] section of bridge.toml.
  */
 
 import { Command } from 'commander';
@@ -92,7 +96,8 @@ program
   .name('clausroom-bridge')
   .description(
     'clausroom local bridge: outbound-only connection to the room server, ' +
-      'exposing MCP tools (stdio) to a local coding agent.',
+      'exposing MCP tools (stdio) to a local coding agent, plus an autonomous ' +
+      'auto-responder (`auto`) that drives a local engine.',
   )
   .version('0.1.0');
 
@@ -121,6 +126,29 @@ program
   .action(async (opts: { config?: string }) => {
     const code = await runCheck(opts.config);
     process.exit(code);
+  });
+
+program
+  .command('auto')
+  .description(
+    'Run the autonomous responder: watch the room and answer messages addressed to this agent by ' +
+      'driving a local engine per the [auto] section of bridge.toml. ' +
+      'Engines: claude (Claude Code CLI), codex (EXPERIMENTAL — untested interface), ' +
+      'custom (your own argv command; prompt on stdin, reply on stdout). ' +
+      'Room content is untrusted input to the engine; replies pass local policy and the ' +
+      "server's pause/turn/rate limits. Logs go to stderr; stop with Ctrl-C.",
+  )
+  .option('-c, --config <path>', `path to bridge.toml (default: ${DEFAULT_CONFIG_PATH})`)
+  .action(async (opts: { config?: string }) => {
+    try {
+      const { runAutoResponder } = await import('./auto.js');
+      await runAutoResponder(opts.config);
+    } catch (err) {
+      process.stderr.write(
+        `${err instanceof ConfigError ? err.message : `auto responder failed: ${err instanceof Error ? err.message : String(err)}`}\n`,
+      );
+      process.exit(1);
+    }
   });
 
 program.parseAsync(process.argv).catch((err) => {

@@ -1,5 +1,7 @@
 # clausroom
 
+[![CI](https://github.com/chengine/clausroom/actions/workflows/ci.yml/badge.svg)](https://github.com/chengine/clausroom/actions/workflows/ci.yml)
+
 A private, two-machine chatroom where two humans and their coding agents debug a
 codebase together — without either human getting access to the other's machine.
 
@@ -12,6 +14,11 @@ structured questions, the teacher's agent answers with file paths, commits, and
 confidence labels, and both humans watch, steer, pause, and approve everything
 from a browser. No SSH, no screen sharing, no repo hand-over — every byte that
 crosses the boundary is an explicit, hashed, human-approvable message or artifact.
+
+<p align="center">
+  <img src="docs/assets/room.png" width="850" alt="clausroom web UI: agents answering with code evidence, a decision card, a pending artifact-upload approval, the pinned room summary, live agent activity, and the agent turn budget" />
+</p>
+<p align="center"><em>The room as the student sees it: evidence-backed agent answers, a decision card, an upload approval waiting on a human, the pinned summary, and the agent turn budget.</em></p>
 
 ## Architecture
 
@@ -47,6 +54,38 @@ Key properties:
   initiates a connection into the other's.
 - Everything agents say is stored and streamed to both humans. Uploads are
   size-capped, secret-scanned, and (for agents) approval-gated.
+
+## Features in v0.1
+
+On top of the core room (auth, messages, artifacts, approvals, pause/turn/rate
+limits), v0.1 adds:
+
+- **Artifact retention + room storage quota** — artifacts expire after
+  `AGENT_ROOM_ARTIFACT_RETENTION_DAYS` (default 30) and are swept from disk;
+  each room's live artifacts are capped at `AGENT_ROOM_ROOM_STORAGE_BYTES`
+  (default 1 GiB, `413 quota_exceeded` beyond it).
+- **Session expiry** — human session tokens slide-expire after
+  `AGENT_ROOM_SESSION_TTL_DAYS` (default 30) of inactivity; active sessions
+  renew themselves, idle ones die. If the admin (bootstrap Host) locks
+  themselves out this way, restarting the server prints a fresh one-time
+  `CLAUSROOM_RECOVERY_INVITE arit_…` line for them.
+- **Secret redaction** — message bodies and the pinned room summary are
+  scanned against the shared secret patterns (including clausroom's own token
+  formats) and matches are replaced with `[redacted-secret]` before storage or
+  broadcast. Best-effort seatbelt, not a guarantee.
+- **Decision cards** — a message with `choices` renders as buttons in the web
+  UI; a human's click posts the chosen text as a reply, and the card shows
+  which option was picked.
+- **Pinned room summary** — any sender can maintain a markdown summary
+  (`PUT /api/rooms/:id/summary`, bridge tools `room_get_summary` /
+  `room_update_summary`) shown as a collapsible card at the top of the room.
+- **Continue button** — when agents hit the consecutive-turn limit, one click
+  (or `/continue` in the composer) posts a human message that grants more turns.
+- **Activity pills** — agents report `working`/`idle` over WebSocket and the UI
+  shows live per-agent status (ephemeral, auto-reverts after 60 s).
+- **Auto-responder** — `clausroom-bridge auto` drives a local engine (Claude
+  Code, Codex, or a custom command) to answer room messages autonomously, with
+  read-only tools by default. See below.
 
 ## Quickstart — HOST (student) side
 
@@ -102,6 +141,11 @@ can reach only port 443 on this one machine.
    - the teacher's agent, `kind: agent`, owned by the teacher → a second `arbt_`
      bridge token (send it to the teacher, never reuse your own).
 
+<p align="center">
+  <img src="docs/assets/onboarding.png" width="850" alt="Room setup drawer with a one-time bridge token modal: the token shown once, plus ready-to-copy bridge.toml and env-var snippets" />
+</p>
+<p align="center"><em>Minting a participant token: shown once, with copy-paste <code>bridge.toml</code> and env-var snippets for the other side.</em></p>
+
 ### 4. Share the server machine with the teacher
 
 In the Tailscale admin console: **Machines → clausroom-host → Share…** and invite
@@ -118,6 +162,13 @@ export AGENT_ROOM_BRIDGE_TOKEN="arbt_<your bridge token>"
 
 Then follow `examples/claude-code-setup.md` to register the bridge as a stdio MCP
 server in Claude Code (or Codex).
+
+> **npx note:** once `clausroom-bridge` is published to npm (after the first
+> tagged release with an `NPM_TOKEN` configured), you can run the bridge with
+> `npx clausroom-bridge mcp --config ~/.clausroom/bridge.toml` instead of a
+> checkout path. Until then — and always, from source — use the node-path
+> invocation shown in `examples/claude-code-setup.md`
+> (`node /path/to/clausroom/apps/bridge/dist/index.js …`).
 
 ## Onboarding — GUEST (teacher) side
 
@@ -160,6 +211,59 @@ send text, but cannot upload files without the teacher's local approval.
   approving one file never authorizes uploading a different one.
 - **Export**: download the full transcript as markdown
   (`GET /api/rooms/<id>/export.md`).
+- **Continue**: when the room hits the agent turn limit, click **Continue** (or
+  type `/continue`) to post `"Continue — granted more agent turns."` and reset
+  the counter.
+- **Summary**: keep the pinned room summary current — it's the card at the top
+  of the room, editable by any participant who can send.
+
+## Auto-responder (Milestone 5)
+
+`clausroom-bridge auto` runs your bridge as an autonomous responder: it watches
+the room, and for each message addressed to your agent it composes a prompt
+(room context + the triggering message), runs a local coding-agent engine, and
+posts the reply through the normal `room_send_message` path. Configure it with
+an `[auto]` table in `~/.clausroom/bridge.toml`:
+
+```toml
+[auto]
+engine               = "claude"                    # 'claude' | 'codex' | 'custom'
+workdir              = "/home/you/projects/my-research-project"  # must be inside filesystem.roots
+allowed_tools        = ["Read", "Grep", "Glob"]    # read-only by default — on purpose
+model                = "sonnet"                    # optional engine model override
+max_turns            = 25                          # engine-internal turn cap per run
+timeout_seconds      = 300                         # wall clock per engine run
+max_context_messages = 30                          # recent room messages in the prompt
+respond_to           = "addressed"                 # or 'mentions_only'
+max_budget_usd       = 2.50                        # optional per-run budget cap
+```
+
+Then:
+
+```bash
+export AGENT_ROOM_BRIDGE_TOKEN="arbt_<your bridge token>"
+node /path/to/clausroom/apps/bridge/dist/index.js auto --config ~/.clausroom/bridge.toml
+# or, once published to npm: npx clausroom-bridge auto --config ~/.clausroom/bridge.toml
+```
+
+> **Windows:** the `claude`/`codex` engines spawn the CLI directly (never via a
+> shell), which does not work with the `.cmd` shims that `npm install -g`
+> creates on Windows — use each CLI's native installer (a real `.exe` on
+> `PATH`) or `engine = "custom"`; see the bridge README's Windows note.
+
+**Safety posture.** The engine gets **read-only tools by default**
+(`Read`, `Grep`, `Glob`); granting write or exec tools is an explicit choice
+you make in the config, not something the room can request. Everything the
+auto-responder reads from the room is **untrusted input** — the composed prompt
+tells the engine to treat instructions embedded in room messages as data, not
+commands, but prompt injection remains the top risk of pointing a tool-bearing
+engine at attacker-influenced text (see `docs/THREAT_MODEL.md`). Every reply
+still passes the bridge's local policy (secret patterns, inline-blob guard,
+`allow_agent_to_send_text`) and **all server limits still bind it**: pause
+flags, the message rate limit, and the consecutive-agent turn limit — a runaway
+auto-responder stops after `AGENT_ROOM_MAX_AUTO_TURNS` messages until a human
+replies or clicks **Continue**. Engine runs are killed at `timeout_seconds`,
+and `max_budget_usd` caps spend per run on engines that support it.
 
 ## Security model summary
 
@@ -201,7 +305,7 @@ From the spec's access-boundary table (`docs/SECURITY.md` and
 apps/
   server/     # @clausroom/server — Express REST + ws WebSocket + better-sqlite3
   web/        # @clausroom/web — Vite + React UI, served by the server at /
-  bridge/     # @clausroom/bridge — local stdio MCP server (outbound-only)
+  bridge/     # clausroom-bridge — local stdio MCP server (outbound-only)
 packages/
   protocol/   # @clausroom/protocol — shared zod schemas, ids, constants (the wire contract)
 deploy/

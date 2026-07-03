@@ -5,7 +5,7 @@
  */
 import path from 'node:path';
 import { minimatch } from 'minimatch';
-import { DEFAULTS, SECRET_NAME_GLOBS } from '@clausroom/protocol';
+import { DEFAULTS, REDACTION_PATTERNS, SECRET_NAME_GLOBS } from '@clausroom/protocol';
 import type { Store } from './db.js';
 
 /** Any run of 2000+ base64-alphabet chars — reject with 422 inline_blob. */
@@ -13,6 +13,27 @@ const INLINE_BLOB_RE = /[A-Za-z0-9+/=]{2000,}/;
 
 export function hasInlineBlob(body: string): boolean {
   return INLINE_BLOB_RE.test(body);
+}
+
+/** Compiled once at module load; String.replace resets lastIndex, so reuse is safe. */
+const REDACTION_REGEXES: readonly RegExp[] = REDACTION_PATTERNS.map(
+  (src) => new RegExp(src, 'g'),
+);
+
+const REDACTED = '[redacted-secret]';
+
+/**
+ * Best-effort secret redaction (docs/API-CONTRACT.md §4): replace every match
+ * of every REDACTION_PATTERNS entry with '[redacted-secret]'. Applied to
+ * message bodies (all sender kinds) after validation, before storage and
+ * broadcast — the original never persists. A seatbelt, not a guarantee.
+ */
+export function redactSecrets(body: string): string {
+  let redacted = body;
+  for (const re of REDACTION_REGEXES) {
+    redacted = redacted.replace(re, REDACTED);
+  }
+  return redacted;
 }
 
 /**

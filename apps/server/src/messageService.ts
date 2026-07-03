@@ -21,6 +21,8 @@ export interface NewMessageInput {
   artifactIds?: string[];
   replyToMessageId?: string | null;
   confidence?: Confidence | null;
+  /** Decision-card choices, stored verbatim as choices_json (null when unset). */
+  choices?: string[] | null;
 }
 
 /** Insert the message row (no broadcast/log). Safe to call inside a transaction. */
@@ -39,6 +41,7 @@ export function createMessage(store: Store, input: NewMessageInput): Message {
     artifact_ids_json: JSON.stringify(input.artifactIds ?? []),
     reply_to_message_id: input.replyToMessageId ?? null,
     confidence: input.confidence ?? null,
+    choices_json: input.choices ? JSON.stringify(input.choices) : null,
     created_at: createdAt,
   });
   const row = store.getMessageInRoom(input.roomId, id);
@@ -58,6 +61,7 @@ export function createMessage(store: Store, input: NewMessageInput): Message {
         artifact_ids: input.artifactIds ?? [],
         reply_to_message_id: input.replyToMessageId ?? null,
         confidence: input.confidence ?? null,
+        choices: input.choices ?? null,
         created_at: createdAt,
       };
 }

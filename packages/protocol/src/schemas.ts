@@ -25,6 +25,10 @@ export const ErrorCodeSchema = z.enum(ERROR_CODES);
 export const ApprovalStatusSchema = z.enum(['pending', 'approved', 'denied', 'expired']);
 export type ApprovalStatus = z.infer<typeof ApprovalStatusSchema>;
 
+/** Agent activity state, carried by WS 'status' (client) and 'activity' (server) frames. */
+export const ActivityStateSchema = z.enum(['working', 'idle']);
+export type ActivityState = z.infer<typeof ActivityStateSchema>;
+
 /** ISO-8601 UTC timestamp string, e.g. "2026-07-02T19:04:05.123Z". */
 export const TimestampSchema = z.string();
 
@@ -51,6 +55,15 @@ export const RoomSchema = z.object({
   /** When true, all agent participants are blocked from sending messages. */
   agents_paused: z.boolean(),
   archived_at: TimestampSchema.nullable(),
+  /**
+   * Pinned room summary (markdown, max DEFAULTS.SUMMARY_MAX_CHARS). Null when unset.
+   * The server always includes the three summary_* fields (optional here only so
+   * clients tolerate pre-v0.1 servers during rolling upgrades).
+   */
+  summary_markdown: z.string().nullable().optional(),
+  /** User id of whoever last updated the summary. Null when never updated. */
+  summary_updated_by: z.string().nullable().optional(),
+  summary_updated_at: TimestampSchema.nullable().optional(),
 });
 export type Room = z.infer<typeof RoomSchema>;
 
@@ -74,6 +87,16 @@ export const MessageSenderSchema = z.object({
 });
 export type MessageSender = z.infer<typeof MessageSenderSchema>;
 
+/**
+ * Inline decision-card choices: 1..DEFAULTS.CHOICES_MAX strings of
+ * 1..DEFAULTS.CHOICE_MAX_CHARS chars each.
+ */
+export const MessageChoicesSchema = z
+  .array(z.string().min(1).max(DEFAULTS.CHOICE_MAX_CHARS))
+  .min(1)
+  .max(DEFAULTS.CHOICES_MAX);
+export type MessageChoices = z.infer<typeof MessageChoicesSchema>;
+
 export const MessageSchema = z.object({
   id: z.string(),
   room_id: z.string(),
@@ -86,6 +109,11 @@ export const MessageSchema = z.object({
   artifact_ids: z.array(z.string()),
   reply_to_message_id: z.string().nullable(),
   confidence: ConfidenceSchema.nullable(),
+  /**
+   * Optional decision-card choices (see docs/API-CONTRACT.md §4). Null and
+   * omitted are equivalent ("no choices"); the server returns null when unset.
+   */
+  choices: MessageChoicesSchema.nullable().optional(),
   created_at: TimestampSchema,
 });
 export type Message = z.infer<typeof MessageSchema>;
@@ -102,7 +130,15 @@ export const ArtifactSchema = z.object({
   sha256: z.string(),
   approval_id: z.string().nullable(),
   created_at: TimestampSchema,
+  /** When retention is enabled: created_at + retention. Null when retention is disabled. */
   expires_at: TimestampSchema.nullable(),
+  /**
+   * Set by the retention sweep when the stored file is unlinked. Metadata routes
+   * still return the row; downloads of a deleted/expired artifact return 404.
+   * The server always includes this field (optional here only so clients
+   * tolerate pre-v0.1 servers during rolling upgrades).
+   */
+  deleted_at: TimestampSchema.nullable().optional(),
 });
 export type Artifact = z.infer<typeof ArtifactSchema>;
 
@@ -155,6 +191,8 @@ export const PostMessageRequestSchema = z.object({
   reply_to_message_id: z.string().optional(),
   confidence: ConfidenceSchema.optional(),
   artifact_ids: z.array(z.string()).optional(),
+  /** Optional decision-card choices (docs/API-CONTRACT.md §4). */
+  choices: MessageChoicesSchema.optional(),
 });
 export type PostMessageRequest = z.infer<typeof PostMessageRequestSchema>;
 
@@ -175,6 +213,12 @@ export const CreateApprovalRequestSchema = z.object({
   payload: z.record(z.unknown()),
 });
 export type CreateApprovalRequest = z.infer<typeof CreateApprovalRequestSchema>;
+
+/** PUT /api/rooms/:id/summary — null clears the summary back to unset. */
+export const UpdateSummaryRequestSchema = z.object({
+  summary_markdown: z.string().min(1).max(DEFAULTS.SUMMARY_MAX_CHARS).nullable(),
+});
+export type UpdateSummaryRequest = z.infer<typeof UpdateSummaryRequestSchema>;
 
 // ---------------------------------------------------------------------------
 // WebSocket frames (server -> client), discriminated on "type"
@@ -226,6 +270,21 @@ export const WsPresenceFrameSchema = z.object({
 });
 export type WsPresenceFrame = z.infer<typeof WsPresenceFrameSchema>;
 
+/**
+ * Broadcast when an agent's activity state changes ('working' pill). Ephemeral:
+ * never persisted; the server auto-reverts to idle after
+ * DEFAULTS.ACTIVITY_IDLE_TIMEOUT_MS without a refreshing status frame, and on
+ * disconnect of the agent's last socket.
+ */
+export const WsActivityFrameSchema = z.object({
+  type: z.literal('activity'),
+  payload: z.object({
+    user_id: z.string(),
+    state: ActivityStateSchema,
+  }),
+});
+export type WsActivityFrame = z.infer<typeof WsActivityFrameSchema>;
+
 export const WsPongFrameSchema = z.object({
   type: z.literal('pong'),
 });
@@ -246,14 +305,20 @@ export const WsServerFrameSchema = z.discriminatedUnion('type', [
   WsParticipantUpdatedFrameSchema,
   WsRoomUpdatedFrameSchema,
   WsPresenceFrameSchema,
+  WsActivityFrameSchema,
   WsPongFrameSchema,
   WsErrorFrameSchema,
 ]);
 export type WsServerFrame = z.infer<typeof WsServerFrameSchema>;
 
-/** Client -> server frames. Only ping is supported; all mutations go over REST. */
+/**
+ * Client -> server frames: ping (answered with pong) and agent activity status.
+ * Status frames are honored only when the connection's user kind is 'agent'
+ * (silently ignored otherwise). All mutations go over REST.
+ */
 export const WsClientFrameSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('ping') }),
+  z.object({ type: z.literal('status'), state: ActivityStateSchema }),
 ]);
 export type WsClientFrame = z.infer<typeof WsClientFrameSchema>;
 

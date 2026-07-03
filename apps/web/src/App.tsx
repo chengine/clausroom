@@ -15,12 +15,28 @@ export function App() {
   const [view, setView] = useState<View>(() => (getSessionToken() ? { name: 'rooms' } : { name: 'login' }));
   const [bootError, setBootError] = useState<string | null>(null);
   const [bootAttempt, setBootAttempt] = useState(0);
+  // Shown on the login screen after an involuntary sign-out (session expiry).
+  const [loginNotice, setLoginNotice] = useState<string | null>(null);
 
   const logout = useCallback(() => {
     setSessionToken(null);
     setToken(null);
     setMe(null);
     setBootError(null);
+    setLoginNotice(null);
+    setView({ name: 'login' });
+  }, []);
+
+  // Every 401 from any view lands here; an expired session (the sliding TTL)
+  // clears the stored token and explains itself on the login screen.
+  const handleUnauthorized = useCallback((err?: unknown) => {
+    setSessionToken(null);
+    setToken(null);
+    setMe(null);
+    setBootError(null);
+    setLoginNotice(
+      api.isSessionExpired(err) ? 'Your session expired — paste a fresh token.' : null,
+    );
     setView({ name: 'login' });
   }, []);
 
@@ -38,21 +54,23 @@ export function App() {
       })
       .catch((err) => {
         if (cancelled) return;
-        if (api.isUnauthorized(err)) logout();
+        if (api.isUnauthorized(err)) handleUnauthorized(err);
         else setBootError(api.errorText(err));
       });
     return () => {
       cancelled = true;
     };
-  }, [token, me, bootAttempt, logout]);
+  }, [token, me, bootAttempt, handleUnauthorized]);
 
   if (!token || view.name === 'login') {
     return (
       <Login
+        notice={loginNotice}
         onLoggedIn={(sessionToken: string, user: User) => {
           setToken(sessionToken);
           setMe(user);
           setBootError(null);
+          setLoginNotice(null);
           setView({ name: 'rooms' });
         }}
       />
@@ -97,7 +115,7 @@ export function App() {
         roomId={view.roomId}
         me={me}
         onBack={() => setView({ name: 'rooms' })}
-        onUnauthorized={logout}
+        onUnauthorized={handleUnauthorized}
       />
     );
   }
@@ -108,7 +126,7 @@ export function App() {
       me={me}
       onEnterRoom={(room: Room) => setView({ name: 'room', roomId: room.id })}
       onLogout={logout}
-      onUnauthorized={logout}
+      onUnauthorized={handleUnauthorized}
     />
   );
 }

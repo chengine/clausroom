@@ -19,6 +19,7 @@ import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
+import Database from 'better-sqlite3';
 import WebSocket from 'ws';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -26,6 +27,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SERVER_ENTRY = path.join(REPO_ROOT, 'apps', 'server', 'dist', 'index.js');
 const BRIDGE_ENTRY = path.join(REPO_ROOT, 'apps', 'bridge', 'dist', 'index.js');
+const BUNDLE_ENTRY = path.join(REPO_ROOT, 'apps', 'bridge', 'dist-npm', 'cli.mjs');
 
 const EXPECTED_TOOLS = [
   'room_get_status',
@@ -38,6 +40,8 @@ const EXPECTED_TOOLS = [
   'room_request_human_approval',
   'room_check_approval',
   'room_mark_resolved',
+  'room_get_summary',
+  'room_update_summary',
 ];
 
 // ---------------------------------------------------------------------------
@@ -83,13 +87,180 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/**
+ * Quote a string for a TOML basic string. JSON string escaping is a strict
+ * subset of TOML basic-string escaping, so this is safe for Windows paths
+ * (backslashes) and quotes alike.
+ */
+function tomlStr(value) {
+  return JSON.stringify(String(value));
+}
+
+/**
+ * Kill a child process cross-platform and wait for it to exit. Does not rely
+ * on POSIX signal semantics: SIGTERM first (plain terminate on Windows), then
+ * SIGKILL after a grace period. Safe to call on an already-dead child.
+ */
+async function killChild(proc, timeoutMs = 10_000) {
+  if (!proc || proc.exitCode !== null || proc.signalCode !== null) return;
+  const exited = new Promise((resolve) => proc.once('exit', resolve));
+  try {
+    proc.kill('SIGTERM');
+  } catch {
+    /* already dead */
+  }
+  if ((await Promise.race([exited, sleep(timeoutMs).then(() => 'timeout')])) === 'timeout') {
+    try {
+      proc.kill('SIGKILL');
+    } catch {
+      /* already dead */
+    }
+    await Promise.race([exited, sleep(5000)]);
+  }
+}
+
+/** Line-buffered watcher over a child's stderr/stdout stream. */
+class LineWatcher {
+  constructor(stream, echoPrefix) {
+    this.lines = [];
+    this.waiters = new Set();
+    this.closed = false;
+    const rl = readline.createInterface({ input: stream });
+    rl.on('line', (line) => {
+      if (echoPrefix) process.stderr.write(`${echoPrefix} ${line}\n`);
+      this.lines.push(line);
+      for (const w of [...this.waiters]) w();
+    });
+    rl.on('close', () => {
+      this.closed = true;
+      for (const w of [...this.waiters]) w();
+    });
+  }
+
+  /** Resolve with the first line (whole buffer) matching `regex`, waiting up to timeoutMs. */
+  waitForLine(regex, timeoutMs, label) {
+    return new Promise((resolve, reject) => {
+      const check = () => {
+        const hit = this.lines.find((l) => regex.test(l));
+        if (hit) {
+          cleanup();
+          resolve(hit);
+        } else if (this.closed) {
+          cleanup();
+          reject(new SmokeFailure(`stream closed while waiting for ${label}`));
+        }
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new SmokeFailure(`timed out after ${timeoutMs}ms waiting for ${label}`));
+      }, timeoutMs);
+      const cleanup = () => {
+        clearTimeout(timer);
+        this.waiters.delete(check);
+      };
+      this.waiters.add(check);
+      check();
+    });
+  }
+}
+
+/**
+ * Spawn a clausroom server on an ephemeral port with the given env overrides
+ * and wait for CLAUSROOM_LISTENING. Returns { proc, port, invite }.
+ */
+async function spawnServerProc(envOverrides, label) {
+  const proc = spawn(process.execPath, [SERVER_ENTRY], {
+    env: {
+      ...process.env,
+      AGENT_ROOM_HOST: '127.0.0.1',
+      AGENT_ROOM_PORT: '0',
+      ...envOverrides,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  proc.stderr.on('data', (d) => process.stderr.write(`[${label}] ${d}`));
+  const rl = readline.createInterface({ input: proc.stdout });
+  const result = { proc, port: null, invite: null };
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new SmokeFailure(`timed out waiting for CLAUSROOM_LISTENING (${label})`)),
+      30_000,
+    );
+    rl.on('line', (line) => {
+      const invite = line.match(/^CLAUSROOM_BOOTSTRAP_INVITE (arit_[0-9a-f]{32})$/);
+      if (invite) result.invite = invite[1];
+      const listening = line.match(/^CLAUSROOM_LISTENING (\d+)$/);
+      if (listening) {
+        result.port = Number(listening[1]);
+        clearTimeout(timer);
+        resolve();
+      }
+    });
+    proc.on('exit', (code) => {
+      clearTimeout(timer);
+      reject(new SmokeFailure(`${label} exited early with code ${code}`));
+    });
+  });
+  return result;
+}
+
+/** Build a single-file multipart/form-data body. */
+function multipartBody(filename, content, extraFields = {}) {
+  const boundary = `----clausroomsmoke${randomBytes(8).toString('hex')}`;
+  const parts = [];
+  for (const [name, value] of Object.entries(extraFields)) {
+    parts.push(
+      Buffer.from(
+        `--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`,
+      ),
+    );
+  }
+  parts.push(
+    Buffer.from(
+      `--${boundary}\r\n` +
+        `Content-Disposition: form-data; name="file"; filename="${filename}"\r\n` +
+        'Content-Type: text/plain\r\n\r\n',
+    ),
+    Buffer.isBuffer(content) ? content : Buffer.from(content),
+    Buffer.from(`\r\n--${boundary}--\r\n`),
+  );
+  return {
+    body: Buffer.concat(parts),
+    contentType: `multipart/form-data; boundary=${boundary}`,
+  };
+}
+
+/**
+ * Env vars a spawned node child needs to work on all three CI platforms
+ * (Windows children in particular misbehave without SYSTEMROOT/TEMP).
+ */
+function inheritedChildEnv() {
+  const env = {};
+  for (const key of [
+    'PATH',
+    'Path',
+    'SYSTEMROOT',
+    'SystemRoot',
+    'WINDIR',
+    'windir',
+    'COMSPEC',
+    'ComSpec',
+    'TEMP',
+    'TMP',
+    'NODE_OPTIONS',
+  ]) {
+    if (process.env[key] !== undefined) env[key] = process.env[key];
+  }
+  return env;
+}
+
 // ---------------------------------------------------------------------------
 // HTTP helper
 // ---------------------------------------------------------------------------
 
 let baseUrl = '';
 
-async function api(method, apiPath, { token, json, body, headers = {}, raw = false } = {}) {
+async function api(method, apiPath, { token, json, body, headers = {}, raw = false, base } = {}) {
   const h = { ...headers };
   if (token) h.authorization = `Bearer ${token}`;
   let payload = body;
@@ -97,7 +268,7 @@ async function api(method, apiPath, { token, json, body, headers = {}, raw = fal
     h['content-type'] = 'application/json';
     payload = JSON.stringify(json);
   }
-  const res = await fetch(`${baseUrl}${apiPath}`, {
+  const res = await fetch(`${base ?? baseUrl}${apiPath}`, {
     method,
     headers: h,
     body: payload,
@@ -203,6 +374,11 @@ class WsProbe {
     });
   }
 
+  /** Send a client frame (JSON) on the underlying socket. */
+  send(frame) {
+    this.ws.send(JSON.stringify(frame));
+  }
+
   close() {
     try {
       this.ws.close();
@@ -240,6 +416,8 @@ async function main() {
   let mcp = null;
   const probes = [];
   const serverStdoutLines = [];
+  /** Extra child processes (secondary servers, auto daemon) killed in finally. */
+  const extraProcs = [];
 
   // state shared across steps
   let bootstrapInvite = null;
@@ -535,8 +713,8 @@ async function main() {
           'bridge_name = "smoke-bridge"',
           '',
           '[room]',
-          `server_url = "${baseUrl}"`,
-          `room_id    = "${room.id}"`,
+          `server_url = ${tomlStr(baseUrl)}`,
+          `room_id    = ${tomlStr(room.id)}`,
           'token_env  = "AGENT_ROOM_BRIDGE_TOKEN"',
           '',
           '[policy]',
@@ -548,8 +726,8 @@ async function main() {
           'max_upload_bytes_absolute          = 104857600',
           '',
           '[filesystem]',
-          `roots         = ["${projectDir}"]`,
-          `downloads_dir = "${downloadsDir}"`,
+          `roots         = [${tomlStr(projectDir)}]`,
+          `downloads_dir = ${tomlStr(downloadsDir)}`,
           '',
         ].join('\n'),
       );
@@ -558,8 +736,9 @@ async function main() {
         command: process.execPath,
         args: [BRIDGE_ENTRY, 'mcp', '--config', bridgeConfigPath],
         env: {
-          PATH: process.env.PATH ?? '',
+          ...inheritedChildEnv(),
           HOME: bridgeHome,
+          USERPROFILE: bridgeHome,
           AGENT_ROOM_BRIDGE_TOKEN: studentAgentBridgeToken,
         },
         stderr: 'pipe',
@@ -835,6 +1014,552 @@ async function main() {
       assertEq(spa.status, 200, 'SPA fallback status');
       assert(spa.buffer.toString('utf8').includes('<title>clausroom</title>'), 'SPA fallback serves index.html');
     });
+
+    // -- j. v0.1 features ---------------------------------------------------------
+
+    await step('redaction', async () => {
+      // 32 lowercase hex chars — a syntactically valid session token.
+      const fakeToken = 'arst_a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6';
+      const res = expectStatus(
+        await api('POST', `/api/rooms/${room.id}/messages`, {
+          token: student.token,
+          json: {
+            message_type: 'human_message',
+            body_markdown: `Careful: ANTHROPIC_API_KEY=sk-ant-xxxx and my session token ${fakeToken} must never leak.`,
+          },
+        }),
+        201,
+        'post secret-bearing message',
+      );
+      const msg = res.data.message;
+      const checkRedacted = (body, label) => {
+        assert(body.includes('[redacted-secret]'), `${label} must contain [redacted-secret]`);
+        assert(!body.includes('ANTHROPIC_API_KEY'), `${label} must not contain ANTHROPIC_API_KEY`);
+        assert(!body.includes('sk-ant'), `${label} must not contain the sk-ant secret`);
+        assert(!body.includes(fakeToken), `${label} must not contain the clausroom token`);
+      };
+      checkRedacted(msg.body_markdown, 'response body');
+      const frame = await teacherProbe.waitFor(
+        (f) => f.type === 'message_created' && f.message.id === msg.id,
+        10_000,
+        'redacted message broadcast',
+      );
+      checkRedacted(frame.message.body_markdown, 'broadcast body');
+      // Stored body is the redacted one — the original never persists.
+      const list = expectStatus(
+        await api('GET', `/api/rooms/${room.id}/messages`, { token: teacher.token }),
+        200,
+        'list messages',
+      );
+      const stored = list.data.messages.find((m) => m.id === msg.id);
+      assert(stored, 'redacted message must be stored');
+      checkRedacted(stored.body_markdown, 'stored body');
+      assertEq(stored.body_markdown, msg.body_markdown, 'stored body == response body');
+    });
+
+    await step('choices-roundtrip', async () => {
+      const choices = ['It is intentional — keep it', 'It is a bug — fix it'];
+      const cardRes = expectStatus(
+        await api('POST', `/api/rooms/${room.id}/messages`, {
+          token: studentAgentBridgeToken,
+          json: {
+            message_type: 'agent_question',
+            body_markdown: 'Decision needed: keep the fp16 workaround or fix upstream?',
+            choices,
+          },
+        }),
+        201,
+        'post decision card',
+      );
+      const card = cardRes.data.message;
+      assertEq(JSON.stringify(card.choices), JSON.stringify(choices), 'choices stored verbatim');
+      const cardFrame = await teacherProbe.waitFor(
+        (f) => f.type === 'message_created' && f.message.id === card.id,
+        10_000,
+        'decision card broadcast',
+      );
+      assertEq(JSON.stringify(cardFrame.message.choices), JSON.stringify(choices), 'broadcast choices');
+
+      // Human answers with a body exactly equal to one choice (button click semantics).
+      const replyRes = expectStatus(
+        await api('POST', `/api/rooms/${room.id}/messages`, {
+          token: student.token,
+          json: {
+            message_type: 'human_message',
+            body_markdown: choices[1],
+            reply_to_message_id: card.id,
+          },
+        }),
+        201,
+        'post choice reply',
+      );
+      const reply = replyRes.data.message;
+      assertEq(reply.body_markdown, choices[1], 'reply body is exactly the choice');
+      const replyFrame = await teacherProbe.waitFor(
+        (f) => f.type === 'message_created' && f.message.id === reply.id,
+        10_000,
+        'choice reply broadcast',
+      );
+      assertEq(replyFrame.message.reply_to_message_id, card.id, 'reply_to on the broadcast reply');
+    });
+
+    await step('summary-roundtrip', async () => {
+      const summary = '## Smoke status\n- redaction verified\n- decision card answered';
+      const put = expectStatus(
+        await api('PUT', `/api/rooms/${room.id}/summary`, {
+          token: studentAgentBridgeToken,
+          json: { summary_markdown: summary },
+        }),
+        200,
+        'PUT summary as agent bridge token',
+      );
+      assertEq(put.data.room.summary_markdown, summary, 'summary_markdown after PUT');
+      assertEq(put.data.room.summary_updated_by, studentAgentId, 'summary_updated_by');
+      assert(put.data.room.summary_updated_at, 'summary_updated_at set');
+
+      const get = expectStatus(
+        await api('GET', `/api/rooms/${room.id}`, { token: student.token }),
+        200,
+        'GET room after summary',
+      );
+      assertEq(get.data.room.summary_markdown, summary, 'GET room reflects the summary');
+
+      await studentProbe.waitFor(
+        (f) => f.type === 'room_updated' && f.room.summary_markdown === summary,
+        10_000,
+        'room_updated broadcast with the summary',
+      );
+      await studentProbe.waitFor(
+        (f) =>
+          f.type === 'message_created' &&
+          f.message.message_type === 'system_event' &&
+          f.message.body_markdown === 'Student Agent updated the room summary.',
+        10_000,
+        'summary system_event message',
+      );
+    });
+
+    await step('activity', async () => {
+      const agentProbe = await WsProbe.connect(
+        `ws://127.0.0.1:${port}/ws?room_id=${room.id}&token=${teacherAgentBridgeToken}`,
+      );
+      probes.push(agentProbe);
+      await agentProbe.waitFor((f) => f.type === 'hello', 10_000, 'agent ws hello');
+
+      agentProbe.send({ type: 'status', state: 'working' });
+      const workingFrame = await studentProbe.waitFor(
+        (f) => f.type === 'activity' && f.payload.user_id === teacherAgentId && f.payload.state === 'working',
+        10_000,
+        'activity working frame on the human WS',
+      );
+      assertEq(workingFrame.payload.state, 'working', 'activity state working');
+
+      agentProbe.send({ type: 'status', state: 'idle' });
+      await studentProbe.waitFor(
+        (f) => f.type === 'activity' && f.payload.user_id === teacherAgentId && f.payload.state === 'idle',
+        10_000,
+        'activity idle frame on the human WS',
+      );
+      agentProbe.close();
+    });
+
+    await step('quota', async () => {
+      const dataDir = path.join(tmpRoot, 'quota-server');
+      const srv = await spawnServerProc(
+        {
+          AGENT_ROOM_DB: path.join(dataDir, 'db.sqlite'),
+          AGENT_ROOM_ARTIFACT_DIR: path.join(dataDir, 'artifacts'),
+          AGENT_ROOM_ROOM_STORAGE_BYTES: '20',
+        },
+        'quota-server',
+      );
+      extraProcs.push(srv.proc);
+      try {
+        const base = `http://127.0.0.1:${srv.port}`;
+        assert(srv.invite, 'quota server bootstrap invite');
+        const login = expectStatus(
+          await api('POST', '/api/auth/login', { base, json: { invite_token: srv.invite } }),
+          200,
+          'quota login',
+        );
+        const qToken = login.data.session_token;
+        const qRoom = expectStatus(
+          await api('POST', '/api/rooms', { base, token: qToken, json: { name: 'Quota Room' } }),
+          201,
+          'quota room',
+        ).data.room;
+
+        const fifteen = 'x'.repeat(15); // quota is 20 bytes: first fits, second cannot
+        const first = multipartBody('first.txt', fifteen);
+        expectStatus(
+          await api('POST', `/api/rooms/${qRoom.id}/artifacts`, {
+            base,
+            token: qToken,
+            body: first.body,
+            headers: { 'content-type': first.contentType },
+          }),
+          201,
+          'first upload under quota',
+        );
+        const second = multipartBody('second.txt', fifteen);
+        const blocked = expectError(
+          await api('POST', `/api/rooms/${qRoom.id}/artifacts`, {
+            base,
+            token: qToken,
+            body: second.body,
+            headers: { 'content-type': second.contentType },
+          }),
+          413,
+          'quota_exceeded',
+          'second upload over quota',
+        );
+        assertEq(
+          blocked.data.error.message,
+          'Room storage quota exceeded. Wait for older artifacts to expire or ask the room owner to raise AGENT_ROOM_ROOM_STORAGE_BYTES.',
+          'quota_exceeded message',
+        );
+        // Rollback: the failed upload left no artifact row behind.
+        const list = expectStatus(
+          await api('GET', `/api/rooms/${qRoom.id}/artifacts`, { base, token: qToken }),
+          200,
+          'quota artifact list',
+        );
+        assertEq(list.data.artifacts.length, 1, 'only the first artifact exists');
+      } finally {
+        await killChild(srv.proc);
+      }
+    });
+
+    await step('retention', async () => {
+      const dataDir = path.join(tmpRoot, 'retention-server');
+      const artifactDir2 = path.join(dataDir, 'artifacts');
+      const env = {
+        AGENT_ROOM_DB: path.join(dataDir, 'db.sqlite'),
+        AGENT_ROOM_ARTIFACT_DIR: artifactDir2,
+        AGENT_ROOM_ARTIFACT_RETENTION_DAYS: '0', // immediate expiry
+      };
+      let srv = await spawnServerProc(env, 'retention-server');
+      extraProcs.push(srv.proc);
+      try {
+        let base = `http://127.0.0.1:${srv.port}`;
+        assert(srv.invite, 'retention server bootstrap invite');
+        const login = expectStatus(
+          await api('POST', '/api/auth/login', { base, json: { invite_token: srv.invite } }),
+          200,
+          'retention login',
+        );
+        const rToken = login.data.session_token;
+        const rRoom = expectStatus(
+          await api('POST', '/api/rooms', { base, token: rToken, json: { name: 'Retention Room' } }),
+          201,
+          'retention room',
+        ).data.room;
+
+        const upload = multipartBody('note.txt', 'retention probe\n');
+        const created = expectStatus(
+          await api('POST', `/api/rooms/${rRoom.id}/artifacts`, {
+            base,
+            token: rToken,
+            body: upload.body,
+            headers: { 'content-type': upload.contentType },
+          }),
+          201,
+          'retention upload',
+        ).data.artifact;
+        assert(created.expires_at, 'expires_at set with retention 0');
+        const storedPath = path.join(
+          artifactDir2,
+          rRoom.id,
+          created.id,
+          `${created.sha256}__note.txt`,
+        );
+        assert(fs.existsSync(storedPath), `stored file missing before restart: ${storedPath}`);
+
+        // Lazy expiry: download 404s even before the sweep marks the row.
+        const dl1 = expectError(
+          await api('GET', `/api/rooms/${rRoom.id}/artifacts/${created.id}/download`, {
+            base,
+            token: rToken,
+          }),
+          404,
+          'not_found',
+          'expired download before sweep',
+        );
+        assertEq(dl1.data.error.message, 'Artifact expired or deleted.', 'expired download message');
+
+        // Restart on the same data dir: the boot sweep must unlink the file.
+        await killChild(srv.proc);
+        srv = await spawnServerProc(env, 'retention-server-2');
+        extraProcs.push(srv.proc);
+        base = `http://127.0.0.1:${srv.port}`;
+        assert(!fs.existsSync(storedPath), `boot sweep left the file on disk: ${storedPath}`);
+
+        // Metadata is never hidden; only the download 404s.
+        const meta = expectStatus(
+          await api('GET', `/api/rooms/${rRoom.id}/artifacts/${created.id}`, { base, token: rToken }),
+          200,
+          'swept artifact metadata',
+        );
+        assert(meta.data.artifact.deleted_at, 'deleted_at set after the boot sweep');
+        const dl2 = expectError(
+          await api('GET', `/api/rooms/${rRoom.id}/artifacts/${created.id}/download`, {
+            base,
+            token: rToken,
+          }),
+          404,
+          'not_found',
+          'expired download after sweep',
+        );
+        assertEq(dl2.data.error.message, 'Artifact expired or deleted.', 'swept download message');
+      } finally {
+        await killChild(srv.proc);
+      }
+    });
+
+    await step('session-expiry', async () => {
+      // Mint a throwaway human session on the MAIN server, then backdate it
+      // directly in SQLite (WAL allows a second writer) and watch it 401.
+      const added = expectStatus(
+        await api('POST', `/api/rooms/${room.id}/participants`, {
+          token: student.token,
+          json: { display_name: 'Expiry Probe', kind: 'human', role: 'human' },
+        }),
+        201,
+        'add expiry probe human',
+      );
+      const login = expectStatus(
+        await api('POST', '/api/auth/login', { json: { invite_token: added.data.invite_token } }),
+        200,
+        'expiry probe login',
+      );
+      const probeToken = login.data.session_token;
+      expectStatus(await api('GET', '/api/me', { token: probeToken }), 200, 'fresh session works');
+
+      const db = new Database(path.join(tmpRoot, 'clausroom.sqlite'));
+      try {
+        db.pragma('busy_timeout = 5000');
+        const backdated = new Date(Date.now() - 40 * 86_400_000).toISOString(); // TTL default is 30 days
+        const info = db
+          .prepare('UPDATE tokens SET created_at = ?, last_used_at = ? WHERE token_hash = ?')
+          .run(backdated, backdated, sha256Hex(probeToken));
+        assertEq(info.changes, 1, 'backdated token rows');
+      } finally {
+        db.close();
+      }
+
+      const expired = expectError(
+        await api('GET', '/api/me', { token: probeToken }),
+        401,
+        'unauthorized',
+        'expired session request',
+      );
+      assertEq(
+        expired.data.error.message,
+        'Session expired. Ask the room owner for a fresh invite/token.',
+        'session expiry message',
+      );
+      // Bridge tokens never TTL-expire: the (older) agent token still works.
+      expectStatus(
+        await api('GET', `/api/rooms/${room.id}`, { token: studentAgentBridgeToken }),
+        200,
+        'bridge token unaffected by session TTL',
+      );
+    });
+
+    await step('auto-adapter-custom', async () => {
+      // A hermetic 'custom' engine: reads the prompt from stdin, prints a
+      // canned reply with a Confidence trailer. CI-safe (no real engine).
+      const helperPath = path.join(tmpRoot, 'engine-helper.mjs');
+      await fsp.writeFile(
+        helperPath,
+        [
+          "let input = '';",
+          "process.stdin.setEncoding('utf8');",
+          'for await (const chunk of process.stdin) input += chunk;',
+          '// Simulate a real engine taking a moment: this keeps the turn-limit',
+          '// spam below deterministic (all spam posts land before the first',
+          '// spam answer) even on slow CI runners.',
+          'await new Promise((r) => setTimeout(r, 1200));',
+          'const reply = [',
+          "  'Canned answer from the smoke custom engine.',",
+          '  `I read ${input.length} prompt characters.`,',
+          "  '',",
+          "  'Confidence: high',",
+          "].join('\\n');",
+          "process.stdout.write(reply + '\\n');",
+          '',
+        ].join('\n'),
+      );
+      const autoConfigPath = path.join(tmpRoot, 'bridge.auto.toml');
+      await fsp.writeFile(
+        autoConfigPath,
+        [
+          '[identity]',
+          'human_name  = "Teacher"',
+          'agent_name  = "Teacher Agent"',
+          'bridge_name = "smoke-auto-bridge"',
+          '',
+          '[room]',
+          `server_url = ${tomlStr(baseUrl)}`,
+          `room_id    = ${tomlStr(room.id)}`,
+          'token_env  = "AGENT_ROOM_BRIDGE_TOKEN"',
+          '',
+          '[policy]',
+          'read_only_default        = false',
+          'allow_agent_to_send_text = true',
+          '',
+          '[filesystem]',
+          `roots = [${tomlStr(projectDir)}]`,
+          '',
+          '[auto]',
+          'engine               = "custom"',
+          `workdir              = ${tomlStr(projectDir)}`,
+          `custom_command       = ${JSON.stringify([process.execPath, helperPath])}`,
+          'timeout_seconds      = 60',
+          'max_context_messages = 5',
+          '',
+        ].join('\n'),
+      );
+
+      const daemon = spawn(
+        process.execPath,
+        [BRIDGE_ENTRY, 'auto', '--config', autoConfigPath],
+        {
+          env: {
+            ...inheritedChildEnv(),
+            HOME: bridgeHome,
+            USERPROFILE: bridgeHome,
+            AGENT_ROOM_BRIDGE_TOKEN: teacherAgentBridgeToken,
+          },
+          stdio: ['ignore', 'ignore', 'pipe'],
+        },
+      );
+      extraProcs.push(daemon);
+      const daemonLog = new LineWatcher(daemon.stderr, '[auto-daemon]');
+      try {
+        // Wait until the daemon has primed its cursor (history is never answered).
+        await daemonLog.waitForLine(
+          /no saved read cursor|room is empty|resuming from saved cursor/,
+          30_000,
+          'auto daemon prime',
+        );
+
+        // One addressed question -> one agent_answer with confidence high.
+        const q1 = expectStatus(
+          await api('POST', `/api/rooms/${room.id}/messages`, {
+            token: student.token,
+            json: {
+              message_type: 'human_message',
+              body_markdown: 'Teacher Agent: what does the canned engine say?',
+              recipient_ids: [teacherAgentId],
+            },
+          }),
+          201,
+          'post auto question',
+        ).data.message;
+        const answer = await studentProbe.waitFor(
+          (f) =>
+            f.type === 'message_created' &&
+            f.message.sender.id === teacherAgentId &&
+            f.message.message_type === 'agent_answer' &&
+            f.message.reply_to_message_id === q1.id,
+          20_000,
+          'auto agent_answer on the human WS',
+        );
+        assertEq(answer.message.confidence, 'high', 'confidence parsed from the trailer');
+        assert(
+          answer.message.body_markdown.includes('Canned answer from the smoke custom engine.'),
+          'answer body from the custom engine',
+        );
+        assert(
+          !/confidence:\s*high/i.test(answer.message.body_markdown),
+          'confidence trailer stripped from the body',
+        );
+
+        // Spam 4 quick questions: answers 2-4 post, the 5th hits the server
+        // turn limit (3 consecutive agent messages) and the daemon must wait
+        // for a human instead of crashing.
+        const spam = [];
+        for (let i = 2; i <= 5; i += 1) {
+          spam.push(
+            expectStatus(
+              await api('POST', `/api/rooms/${room.id}/messages`, {
+                token: student.token,
+                json: { message_type: 'human_message', body_markdown: `Spam question #${i}.` },
+              }),
+              201,
+              `spam question ${i}`,
+            ).data.message,
+          );
+        }
+        await daemonLog.waitForLine(
+          /waiting for the next human message/,
+          120_000,
+          'daemon hitting the turn limit gracefully',
+        );
+        assert(daemon.exitCode === null && daemon.signalCode === null, 'daemon must not crash on turn_limit');
+
+        // A human Continue resets the run; the blocked reply then posts.
+        const lastSpam = spam[spam.length - 1];
+        expectStatus(
+          await api('POST', `/api/rooms/${room.id}/messages`, {
+            token: student.token,
+            json: {
+              message_type: 'human_message',
+              body_markdown: 'Continue — granted more agent turns.',
+            },
+          }),
+          201,
+          'continue message',
+        );
+        await studentProbe.waitFor(
+          (f) =>
+            f.type === 'message_created' &&
+            f.message.sender.id === teacherAgentId &&
+            f.message.message_type === 'agent_answer' &&
+            f.message.reply_to_message_id === lastSpam.id,
+          60_000,
+          'blocked reply posted after Continue',
+        );
+        assert(daemon.exitCode === null && daemon.signalCode === null, 'daemon still alive after the spam');
+      } finally {
+        await killChild(daemon);
+      }
+    });
+
+    await step('bundle-sanity', async () => {
+      assert(fs.existsSync(BUNDLE_ENTRY), `npm bundle not built: ${BUNDLE_ENTRY} missing (run npm run build)`);
+      const child = spawn(process.execPath, [BUNDLE_ENTRY, '--help'], {
+        env: { ...inheritedChildEnv() },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (d) => {
+        stdout += String(d);
+      });
+      child.stderr.on('data', (d) => {
+        stderr += String(d);
+      });
+      const code = await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          child.kill('SIGKILL');
+          reject(new SmokeFailure('bundle --help timed out'));
+        }, 30_000);
+        child.on('exit', (c) => {
+          clearTimeout(timer);
+          resolve(c);
+        });
+        child.on('error', (err) => {
+          clearTimeout(timer);
+          reject(err);
+        });
+      });
+      assertEq(code, 0, `bundle --help exit code (stderr: ${stderr.slice(0, 200)})`);
+      for (const cmd of ['mcp', 'check', 'auto']) {
+        assert(new RegExp(`^\\s*${cmd}\\b`, 'm').test(stdout), `--help must list the ${cmd} subcommand`);
+      }
+    });
   } catch (err) {
     if (!(err instanceof AbortRun)) {
       console.error('unexpected harness error:', err);
@@ -850,16 +1575,20 @@ async function main() {
         /* ignore */
       }
     }
-    if (serverProc && serverProc.exitCode === null) {
-      const exited = new Promise((resolve) => serverProc.once('exit', resolve));
-      serverProc.kill('SIGTERM');
-      const timeout = sleep(5000).then(() => 'timeout');
-      if ((await Promise.race([exited, timeout])) === 'timeout') {
-        serverProc.kill('SIGKILL');
-        await exited;
+    for (const proc of extraProcs) {
+      await killChild(proc).catch(() => undefined);
+    }
+    await killChild(serverProc).catch(() => undefined);
+    // Windows can hold file locks (sqlite/WAL) for a moment after the children
+    // die — retry, then tolerate EBUSY/EPERM leftovers in the OS temp dir.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        await fsp.rm(tmpRoot, { recursive: true, force: true });
+        break;
+      } catch {
+        await sleep(1000);
       }
     }
-    await fsp.rm(tmpRoot, { recursive: true, force: true }).catch(() => undefined);
   }
 
   const failed = results.filter((r) => !r.passed);

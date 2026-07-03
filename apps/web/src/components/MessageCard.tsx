@@ -1,7 +1,7 @@
-import type { CSSProperties } from 'react';
+import { useState, type CSSProperties } from 'react';
 import type { Artifact, Message } from '@clausroom/protocol';
-import { fmtTime, humanSize, initials, preview, shortSha, typeLabel } from '../format.js';
-import { BotIcon, DownloadIcon, FileIcon, PersonIcon, ReplyIcon, SparkIcon } from './icons.js';
+import { fmtTime, humanSize, initials, isArtifactDead, preview, shortSha, typeLabel } from '../format.js';
+import { BotIcon, CheckIcon, DownloadIcon, FileIcon, PersonIcon, ReplyIcon, SparkIcon } from './icons.js';
 import { Markdown } from './Markdown.js';
 
 interface MessageCardProps {
@@ -11,6 +11,14 @@ interface MessageCardProps {
   messageById: (id: string) => Message | undefined;
   artifactById: (id: string) => Artifact | undefined;
   onDownloadArtifact: (artifact: Artifact) => void;
+  /** Decision cards: the choice a human already answered with (null = open). */
+  answeredChoice: string | null;
+  /** Whether the viewer may click a choice (human participant with can_send). */
+  canChoose: boolean;
+  /** Posts the choice text as a human reply to this card. Never rejects. */
+  onChoose: (choice: string) => Promise<void>;
+  /** Live agent-activity: the sender is currently reporting 'working'. */
+  senderWorking: boolean;
 }
 
 export function MessageCard({
@@ -20,7 +28,24 @@ export function MessageCard({
   messageById,
   artifactById,
   onDownloadArtifact,
+  answeredChoice,
+  canChoose,
+  onChoose,
+  senderWorking,
 }: MessageCardProps) {
+  // The choice currently being posted; all buttons disable while in flight.
+  const [pendingChoice, setPendingChoice] = useState<string | null>(null);
+
+  async function choose(choice: string) {
+    if (pendingChoice !== null || answeredChoice !== null || !canChoose) return;
+    setPendingChoice(choice);
+    try {
+      await onChoose(choice);
+    } finally {
+      setPendingChoice(null);
+    }
+  }
+
   if (message.message_type === 'system_event') {
     return (
       <div className="system-row" data-message-id={message.id}>
@@ -46,6 +71,9 @@ export function MessageCard({
     >
       <div className="msg-card__avatar" aria-hidden="true">
         {initials(message.sender.display_name)}
+        {senderWorking && (
+          <span className="presence-dot presence-dot--on presence-dot--working" title="working…" />
+        )}
       </div>
       <div className="msg-card__main">
         <header className="msg-card__head">
@@ -91,30 +119,55 @@ export function MessageCard({
 
         <Markdown source={message.body_markdown} />
 
+        {message.choices && message.choices.length > 0 && (
+          <div className="choice-row" role="group" aria-label="Decision choices">
+            {message.choices.map((choice, i) => {
+              const chosen = answeredChoice === choice;
+              return (
+                <button
+                  key={`${i}:${choice}`}
+                  type="button"
+                  className={`choice-pill${chosen ? ' choice-pill--chosen' : ''}`}
+                  disabled={answeredChoice !== null || pendingChoice !== null || !canChoose}
+                  onClick={() => void choose(choice)}
+                >
+                  {chosen && <CheckIcon size={12} />}
+                  <span className="choice-pill__text">{choice}</span>
+                  {pendingChoice === choice && <span className="choice-pill__spinner" />}
+                </button>
+              );
+            })}
+          </div>
+        )}
+
         {message.artifact_ids.length > 0 && (
           <div className="msg-card__artifacts">
             {message.artifact_ids.map((id) => {
               const artifact = artifactById(id);
-              return artifact ? (
+              if (!artifact) {
+                return (
+                  <span key={id} className="artifact-chip artifact-chip--loading">
+                    <FileIcon size={14} />
+                    <span className="artifact-chip__name">loading artifact…</span>
+                  </span>
+                );
+              }
+              const dead = isArtifactDead(artifact);
+              return (
                 <button
                   key={id}
                   type="button"
-                  className="artifact-chip"
+                  className={`artifact-chip${dead ? ' artifact-chip--dead' : ''}`}
                   onClick={() => onDownloadArtifact(artifact)}
-                  title={`sha256 ${artifact.sha256}`}
+                  title={dead ? 'expired or deleted' : `sha256 ${artifact.sha256}`}
                 >
                   <FileIcon size={14} />
                   <span className="artifact-chip__name">{artifact.filename}</span>
                   <span className="artifact-chip__meta">
-                    {humanSize(artifact.size_bytes)} · {shortSha(artifact.sha256)}
+                    {humanSize(artifact.size_bytes)} · {dead ? 'expired' : shortSha(artifact.sha256)}
                   </span>
-                  <DownloadIcon size={13} className="artifact-chip__dl" />
+                  {!dead && <DownloadIcon size={13} className="artifact-chip__dl" />}
                 </button>
-              ) : (
-                <span key={id} className="artifact-chip artifact-chip--loading">
-                  <FileIcon size={14} />
-                  <span className="artifact-chip__name">loading artifact…</span>
-                </span>
               );
             })}
           </div>
