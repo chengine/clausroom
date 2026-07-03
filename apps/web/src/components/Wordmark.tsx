@@ -14,14 +14,14 @@ export function Wordmark({ size = 'sm' }: WordmarkProps) {
       >
         <defs>
           <linearGradient id="wm-grad" x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0" stopColor="#8b5cf6" />
-            <stop offset="1" stopColor="#38bdf8" />
+            <stop offset="0" stopColor="#f59e0b" />
+            <stop offset="1" stopColor="#f97316" />
           </linearGradient>
         </defs>
         <rect x="2" y="4" width="28" height="20" rx="7" fill="url(#wm-grad)" />
         <path d="M10 24 L10 30 L17 24 Z" fill="url(#wm-grad)" />
-        <circle cx="11" cy="14" r="2.4" fill="#0b0f1a" />
-        <circle cx="21" cy="14" r="2.4" fill="#0b0f1a" />
+        <circle cx="11" cy="14" r="2.4" fill="#16130e" />
+        <circle cx="21" cy="14" r="2.4" fill="#16130e" />
       </svg>
       <span className="wordmark__text">clausroom</span>
     </span>

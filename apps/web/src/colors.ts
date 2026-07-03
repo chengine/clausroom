@@ -1,26 +1,24 @@
 /**
  * Participant accent colors. The canonical two-humans-two-agents room gets
- * fixed colors (host human sky, host agent violet, guest human amber, guest
- * agent emerald); any extra participants cycle a palette. "Host" is the room
- * owner; "guest" is the next human to join.
+ * fixed colors (host human amber, host agent rose, guest human emerald, guest
+ * agent sky); any extra participants cycle a warm-friendly palette. "Host" is
+ * the room owner; "guest" is the next human to join.
  */
 import type { Participant } from '@clausroom/protocol';
 
-export const HOST_HUMAN_COLOR = '#38bdf8';
-export const HOST_AGENT_COLOR = '#a78bfa';
-export const GUEST_HUMAN_COLOR = '#fbbf24';
-export const GUEST_AGENT_COLOR = '#34d399';
-export const SYSTEM_COLOR = '#8b93a7';
+export const HOST_HUMAN_COLOR = '#fbbf24';
+export const HOST_AGENT_COLOR = '#fb7185';
+export const GUEST_HUMAN_COLOR = '#34d399';
+export const GUEST_AGENT_COLOR = '#38bdf8';
+export const SYSTEM_COLOR = '#a39684';
 
 export const EXTRA_PALETTE: readonly string[] = [
-  '#f472b6',
-  '#60a5fa',
-  '#facc15',
-  '#4ade80',
-  '#c084fc',
-  '#2dd4bf',
   '#fb923c',
+  '#f472b6',
+  '#facc15',
   '#a3e635',
+  '#2dd4bf',
+  '#fda4af',
 ];
 
 function byJoined(a: Participant, b: Participant): number {

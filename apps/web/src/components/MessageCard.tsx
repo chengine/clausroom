@@ -7,6 +7,12 @@ import { Markdown } from './Markdown.js';
 interface MessageCardProps {
   message: Message;
   color: string;
+  /**
+   * True when the sender belongs to the viewer's camp (the viewer or an agent
+   * they own): the card aligns right with mirrored chrome. system_event rows
+   * ignore this and stay centered.
+   */
+  mine: boolean;
   nameOf: (userId: string) => string;
   messageById: (id: string) => Message | undefined;
   artifactById: (id: string) => Artifact | undefined;
@@ -24,6 +30,7 @@ interface MessageCardProps {
 export function MessageCard({
   message,
   color,
+  mine,
   nameOf,
   messageById,
   artifactById,
@@ -65,7 +72,7 @@ export function MessageCard({
 
   return (
     <article
-      className="msg-card"
+      className={`msg-card ${mine ? 'msg-card--mine' : 'msg-card--theirs'}`}
       data-message-id={message.id}
       style={{ '--pc': color } as CSSProperties}
     >

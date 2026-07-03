@@ -51,6 +51,16 @@ export function RoomView({ token, roomId, me, onBack, onUnauthorized }: RoomView
   const colorMap = useMemo(() => buildColorMap(state.participants), [state.participants]);
   const colorOf = (userId: string) => colorFor(colorMap, userId);
 
+  // The viewer's camp: me plus every agent I own. Camp messages align right
+  // in the timeline; everyone else's align left (system events stay centered).
+  const myCampIds = useMemo(() => {
+    const ids = new Set<string>([me.id]);
+    for (const p of state.participants) {
+      if (p.user.kind === 'agent' && p.user.owner_user_id === me.id) ids.add(p.user_id);
+    }
+    return ids;
+  }, [state.participants, me.id]);
+
   const namesById = useMemo(() => {
     const map = new Map<string, string>();
     for (const p of state.participants) map.set(p.user_id, p.user.display_name);
@@ -300,6 +310,7 @@ export function RoomView({ token, roomId, me, onBack, onUnauthorized }: RoomView
                   key={`m-${item.id}`}
                   message={item.message}
                   color={colorOf(item.message.sender.id)}
+                  mine={myCampIds.has(item.message.sender.id)}
                   nameOf={nameOf}
                   messageById={(id) => messagesById.get(id)}
                   artifactById={(id) => state.artifacts[id]}
