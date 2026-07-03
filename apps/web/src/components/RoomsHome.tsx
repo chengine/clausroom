@@ -3,6 +3,7 @@ import type { Room, User } from '@clausroom/protocol';
 import * as api from '../api.js';
 import { fmtDate } from '../format.js';
 import { ArrowLeftIcon, PlusIcon } from './icons.js';
+import { ThemeToggle } from './ThemeToggle.js';
 import { Wordmark } from './Wordmark.js';
 
 interface RoomsHomeProps {
@@ -60,6 +61,7 @@ export function RoomsHome({ token, me, onEnterRoom, onLogout, onUnauthorized }: 
       <header className="topbar">
         <Wordmark />
         <div className="topbar__right">
+          <ThemeToggle />
           <span className="user-chip" title={me.id}>
             <span className="user-chip__dot" />
             {me.display_name}

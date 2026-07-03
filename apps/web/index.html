@@ -4,10 +4,39 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark" />
-    <meta name="theme-color" content="#16130e" />
+    <meta name="theme-color" content="#0c1220" />
     <link rel="icon" type="image/png" href="/favicon.png" />
     <link rel="apple-touch-icon" href="/claus.png" />
     <title>clausroom</title>
+    <script>
+      // Apply the persisted theme before first paint (no flash). Default is
+      // coral, except a light-mode OS preference defaults to academic; nothing
+      // is persisted until the user actually toggles (src/theme.ts).
+      (function () {
+        var theme = null;
+        try {
+          theme = window.localStorage.getItem('clausroom.theme');
+        } catch (e) {
+          /* localStorage unavailable: fall through to defaults */
+        }
+        if (theme !== 'coral' && theme !== 'blueprint' && theme !== 'academic') {
+          theme =
+            window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches
+              ? 'academic'
+              : 'coral';
+        }
+        if (theme !== 'coral') document.documentElement.dataset.theme = theme;
+        var meta = {
+          coral: ['#0c1220', 'dark'],
+          blueprint: ['#0a1620', 'dark'],
+          academic: ['#faf6ef', 'light'],
+        }[theme];
+        var themeColor = document.querySelector('meta[name="theme-color"]');
+        var colorScheme = document.querySelector('meta[name="color-scheme"]');
+        if (themeColor) themeColor.setAttribute('content', meta[0]);
+        if (colorScheme) colorScheme.setAttribute('content', meta[1]);
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

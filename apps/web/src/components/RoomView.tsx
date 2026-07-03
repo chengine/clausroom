@@ -10,6 +10,7 @@ import { Composer } from './Composer.js';
 import { MessageCard } from './MessageCard.js';
 import { OwnerDrawer } from './OwnerDrawer.js';
 import { Sidebar } from './Sidebar.js';
+import { ThemeToggle } from './ThemeToggle.js';
 import {
   ArrowDownIcon,
   ArrowLeftIcon,
@@ -228,6 +229,7 @@ export function RoomView({ token, roomId, me, onBack, onUnauthorized }: RoomView
             <span className="conn-pill__dot" />
             {CONN_LABEL[state.conn]}
           </span>
+          <ThemeToggle />
         </div>
         <div className="room-header__actions">
           {state.room && (

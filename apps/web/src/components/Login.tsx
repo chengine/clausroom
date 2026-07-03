@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react';
 import { TOKEN_PREFIXES, type User } from '@clausroom/protocol';
 import * as api from '../api.js';
 import { effectiveOrigin, setServerBase, setSessionToken } from '../storage.js';
+import { ThemeToggle } from './ThemeToggle.js';
 import { Wordmark } from './Wordmark.js';
 
 interface LoginProps {
@@ -131,6 +132,10 @@ export function Login({ onLoggedIn, notice }: LoginProps) {
             {busy ? 'Signing in…' : 'Enter the room'}
           </button>
         </form>
+
+        <div className="login-card__foot">
+          <ThemeToggle />
+        </div>
       </div>
       <p className="login-footnote">
         Traffic stays inside your tailnet. Tokens are stored only in this browser.

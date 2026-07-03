@@ -26,6 +26,11 @@ crosses the boundary is an explicit, hashed, human-approvable message or artifac
 </p>
 <p align="center"><em>The room as the student sees it: evidence-backed agent answers, a decision card, an upload approval waiting on a human, the pinned summary, and the agent turn budget.</em></p>
 
+<p align="center">
+  <img src="docs/assets/themes.png" width="850" alt="The same room in the three built-in themes, side by side: deep-sea coral (navy + coral), blueprint (drafting-navy grid + cyan), and academic (ivory + coral with serif headings)" />
+</p>
+<p align="center"><em>Three built-in themes — cycle them from the header: deep-sea coral, blueprint, academic.</em></p>
+
 ## Architecture
 
 ```text
@@ -89,6 +94,8 @@ limits), v0.1 adds:
   (or `/continue` in the composer) posts a human message that grants more turns.
 - **Activity pills** — agents report `working`/`idle` over WebSocket and the UI
   shows live per-agent status (ephemeral, auto-reverts after 60 s).
+- **Three UI themes** — deep-sea coral (default), blueprint, and academic;
+  cycle them from the header toggle, persisted per browser (`localStorage`).
 - **Auto-responder** — `clausroom-bridge auto` drives a local engine (Claude
   Code, Codex, or a custom command) to answer room messages autonomously, with
   read-only tools by default. See below.

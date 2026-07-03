@@ -1463,7 +1463,7 @@ async function main() {
             f.message.sender.id === teacherAgentId &&
             f.message.message_type === 'agent_answer' &&
             f.message.reply_to_message_id === q1.id,
-          20_000,
+          60_000, // generous: the daemon's REST fallback poll runs on a ~15s cadence (issue #3)
           'auto agent_answer on the human WS',
         );
         assertEq(answer.message.confidence, 'high', 'confidence parsed from the trailer');

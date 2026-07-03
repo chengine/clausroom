@@ -1,24 +1,26 @@
 /**
- * Participant accent colors. The canonical two-humans-two-agents room gets
- * fixed colors (host human amber, host agent rose, guest human emerald, guest
- * agent sky); any extra participants cycle a warm-friendly palette. "Host" is
- * the room owner; "guest" is the next human to join.
+ * Participant accent colors, expressed as CSS variable references so every
+ * theme (see styles.css) can restyle them: the canonical two-humans-two-agents
+ * room gets fixed slots (host human / host agent / guest human / guest agent);
+ * any extra participants cycle the --pc-extra-* palette. "Host" is the room
+ * owner; "guest" is the next human to join. Consumers assign these strings to
+ * the --pc custom property; derived tints use color-mix() in styles.css.
  */
 import type { Participant } from '@clausroom/protocol';
 
-export const HOST_HUMAN_COLOR = '#fbbf24';
-export const HOST_AGENT_COLOR = '#fb7185';
-export const GUEST_HUMAN_COLOR = '#34d399';
-export const GUEST_AGENT_COLOR = '#38bdf8';
-export const SYSTEM_COLOR = '#a39684';
+export const HOST_HUMAN_COLOR = 'var(--pc-host-human)';
+export const HOST_AGENT_COLOR = 'var(--pc-host-agent)';
+export const GUEST_HUMAN_COLOR = 'var(--pc-guest-human)';
+export const GUEST_AGENT_COLOR = 'var(--pc-guest-agent)';
+export const SYSTEM_COLOR = 'var(--pc-system)';
 
 export const EXTRA_PALETTE: readonly string[] = [
-  '#fb923c',
-  '#f472b6',
-  '#facc15',
-  '#a3e635',
-  '#2dd4bf',
-  '#fda4af',
+  'var(--pc-extra-0)',
+  'var(--pc-extra-1)',
+  'var(--pc-extra-2)',
+  'var(--pc-extra-3)',
+  'var(--pc-extra-4)',
+  'var(--pc-extra-5)',
 ];
 
 function byJoined(a: Participant, b: Participant): number {
