@@ -7,8 +7,13 @@ on:
 
 jobs:
   build-and-smoke:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    name: build-and-smoke (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

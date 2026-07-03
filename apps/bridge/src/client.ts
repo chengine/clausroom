@@ -34,6 +34,9 @@ import {
   type CreateApprovalRequest,
   type ErrorCode,
   type Message,
+  type Room,
+  type UpdateSummaryRequest,
+  type WsClientFrame,
   type WsServerFrame,
 } from '@clausroom/protocol';
 
@@ -99,6 +102,7 @@ const ArtifactResponseSchema = z.object({ artifact: ArtifactSchema });
 const UploadResponseSchema = z.object({ artifact: ArtifactSchema, message: MessageSchema });
 const ApprovalsResponseSchema = z.object({ approvals: z.array(ApprovalSchema) });
 const ApprovalResponseSchema = z.object({ approval: ApprovalSchema });
+const UpdateSummaryResponseSchema = z.object({ room: RoomSchema });
 
 export type RoomInfo = z.infer<typeof RoomResponseSchema>;
 
@@ -109,6 +113,8 @@ export interface PostMessageBody {
   reply_to_message_id?: string;
   confidence?: string;
   artifact_ids?: string[];
+  /** Decision-card options (contract §4 rule 9): 1..6 strings, ≤120 chars each. */
+  choices?: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -214,6 +220,17 @@ export class RoomClient {
 
   async getRoom(): Promise<RoomInfo> {
     return this.request(RoomResponseSchema, 'GET', `/api/rooms/${this.roomId}`);
+  }
+
+  /** PUT /api/rooms/:id/summary — set (string) or clear (null) the pinned room summary. */
+  async updateSummary(body: UpdateSummaryRequest): Promise<Room> {
+    const out = await this.request(
+      UpdateSummaryResponseSchema,
+      'PUT',
+      `/api/rooms/${this.roomId}/summary`,
+      { json: body },
+    );
+    return out.room;
   }
 
   async listMessages(opts: { after?: string; limit?: number } = {}): Promise<Message[]> {
@@ -408,6 +425,22 @@ export class RoomSocket {
   onFrame(listener: FrameListener): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  /**
+   * Best-effort send of a client frame (ping / activity status). Returns true
+   * when the frame was handed to an OPEN socket, false otherwise. Callers must
+   * treat failure as non-fatal — activity frames are best-effort by contract
+   * (§12): if the WS is down, tool execution proceeds and no frame is sent.
+   */
+  send(frame: WsClientFrame): boolean {
+    if (this.ws === null || this.ws.readyState !== WebSocket.OPEN) return false;
+    try {
+      this.ws.send(JSON.stringify(frame));
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /**

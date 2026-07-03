@@ -6,9 +6,11 @@ import { Wordmark } from './Wordmark.js';
 
 interface LoginProps {
   onLoggedIn: (sessionToken: string, user: User) => void;
+  /** One-off banner explaining an involuntary sign-out (session expiry). */
+  notice?: string | null;
 }
 
-export function Login({ onLoggedIn }: LoginProps) {
+export function Login({ onLoggedIn, notice }: LoginProps) {
   const [tokenInput, setTokenInput] = useState('');
   const [serverInput, setServerInput] = useState(effectiveOrigin());
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -72,6 +74,12 @@ export function Login({ onLoggedIn }: LoginProps) {
             other.
           </p>
         </div>
+
+        {notice && (
+          <div className="notice-banner" role="status">
+            {notice}
+          </div>
+        )}
 
         <form onSubmit={submit} className="login-form">
           <label className="field">

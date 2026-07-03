@@ -35,3 +35,25 @@ roots = ["/home/teacher/projects/legacy-research-project"]
 deny_globs = []
 # Where room_download_artifact writes files (and nowhere else).
 downloads_dir = "~/.clausroom/downloads"
+
+# Optional: autonomous responder (`clausroom-bridge auto`). Only that
+# subcommand reads this table; `mcp` ignores it. Uncomment to let a local
+# engine answer the student's questions automatically. Room content is
+# UNTRUSTED input to the engine — keep allowed_tools read-only unless you
+# accept the risk (see docs/THREAT_MODEL.md). Server pause/rate/turn limits
+# still apply.
+#[auto]
+#engine               = "claude"   # 'claude' | 'codex' | 'custom'
+## Engine working directory; MUST resolve inside filesystem.roots above.
+#workdir              = "/home/teacher/projects/legacy-research-project"
+#allowed_tools        = ["Read", "Grep", "Glob"]  # default; read-only on purpose
+#model                = "sonnet"   # optional; engine default when unset
+#max_turns            = 25         # engine-internal turn cap per run
+#timeout_seconds      = 300        # wall clock per engine run; killed on expiry
+#max_context_messages = 30         # recent room messages included in the prompt
+#respond_to           = "addressed"  # or 'mentions_only'
+#max_budget_usd       = 2.50       # optional per-run budget cap
+## For engine = 'custom' only: argv array, prompt on stdin, reply on stdout.
+#custom_command       = []
+#extra_args           = []         # extra argv appended to the engine CLI
+#bare                 = false      # true = pass the triggering message verbatim

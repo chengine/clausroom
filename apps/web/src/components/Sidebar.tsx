@@ -1,20 +1,29 @@
 import { useState, type CSSProperties } from 'react';
-import type { Approval, Participant } from '@clausroom/protocol';
+import type { Approval, Participant, Room } from '@clausroom/protocol';
 import { errorText } from '../api.js';
 import { initials } from '../format.js';
 import { ApprovalCard, effectiveStatus } from './ApprovalCard.js';
+import { RoomSummary } from './RoomSummary.js';
 import { BotIcon, PauseIcon, PersonIcon, PlayIcon } from './icons.js';
 
 interface SidebarProps {
+  room: Room | null;
   participants: Participant[];
   onlineUserIds: string[];
+  /** Users currently reporting 'working' activity (agents, in practice). */
+  workingUserIds: ReadonlySet<string>;
   meId: string;
   iAmHuman: boolean;
+  /** Viewer is a human participant with can_send (summary edit / continue). */
+  canSend: boolean;
   colorOf: (userId: string) => string;
   nameOf: (userId: string) => string;
   turnRun: number;
   maxTurns: number;
   approvals: Approval[];
+  onUpdateSummary: (summaryMarkdown: string | null) => Promise<void>;
+  /** Posts the canonical Continue message, resetting the agent turn run. */
+  onContinue: () => Promise<void>;
   onSetParticipantPaused: (userId: string, paused: boolean) => Promise<void>;
   onRespondApproval: (approvalId: string, decision: 'approved' | 'denied') => Promise<void>;
   /** Surface an action failure to the human (never swallow pause errors). */
@@ -22,20 +31,26 @@ interface SidebarProps {
 }
 
 export function Sidebar({
+  room,
   participants,
   onlineUserIds,
+  workingUserIds,
   meId,
   iAmHuman,
+  canSend,
   colorOf,
   nameOf,
   turnRun,
   maxTurns,
   approvals,
+  onUpdateSummary,
+  onContinue,
   onSetParticipantPaused,
   onRespondApproval,
   onActionError,
 }: SidebarProps) {
   const [pauseBusy, setPauseBusy] = useState<string | null>(null);
+  const [continueBusy, setContinueBusy] = useState(false);
   const online = new Set(onlineUserIds);
 
   const ordered = [...participants].sort((a, b) => {
@@ -64,12 +79,35 @@ export function Sidebar({
     }
   }
 
+  async function grantContinue() {
+    if (continueBusy) return;
+    setContinueBusy(true);
+    try {
+      await onContinue();
+    } catch (err) {
+      onActionError(`Could not grant more agent turns: ${errorText(err)}`);
+    } finally {
+      setContinueBusy(false);
+    }
+  }
+
   return (
     <aside className="sidebar">
+      {room && (
+        <RoomSummary
+          room={room}
+          canEdit={iAmHuman && canSend}
+          nameOf={nameOf}
+          onSave={onUpdateSummary}
+        />
+      )}
+
       <section className="sidebar__section card">
         <h2 className="sidebar__title">Participants</h2>
         <ul className="participant-list">
-          {ordered.map((p) => (
+          {ordered.map((p) => {
+            const working = p.user.kind === 'agent' && workingUserIds.has(p.user_id);
+            return (
             <li
               key={p.user_id}
               className="participant"
@@ -78,8 +116,10 @@ export function Sidebar({
               <span className="participant__avatar">
                 {initials(p.user.display_name)}
                 <span
-                  className={`presence-dot${online.has(p.user_id) ? ' presence-dot--on' : ''}`}
-                  title={online.has(p.user_id) ? 'online' : 'offline'}
+                  className={`presence-dot${online.has(p.user_id) ? ' presence-dot--on' : ''}${
+                    working ? ' presence-dot--working' : ''
+                  }`}
+                  title={working ? 'working…' : online.has(p.user_id) ? 'online' : 'offline'}
                 />
               </span>
               <span className="participant__info">
@@ -92,6 +132,12 @@ export function Sidebar({
                   <span>{p.role}</span>
                   {p.user.kind === 'agent' && p.user.owner_user_id && (
                     <span className="participant__owner">· steered by {nameOf(p.user.owner_user_id)}</span>
+                  )}
+                  {working && (
+                    <span className="working-pill">
+                      <span className="working-pill__dot" />
+                      working…
+                    </span>
                   )}
                 </span>
               </span>
@@ -111,7 +157,8 @@ export function Sidebar({
                   p.paused && <span className="pill pill--warn">paused</span>
                 ))}
             </li>
-          ))}
+            );
+          })}
         </ul>
       </section>
 
@@ -144,6 +191,17 @@ export function Sidebar({
             ? 'Limit reached — agents must wait for a human message.'
             : 'Consecutive agent messages since the last human message.'}
         </p>
+        {turnRun >= maxTurns && iAmHuman && canSend && (
+          <button
+            type="button"
+            className="btn continue-btn"
+            disabled={continueBusy}
+            onClick={() => void grantContinue()}
+          >
+            <PlayIcon size={14} />
+            {continueBusy ? 'Granting…' : 'Continue — grant more agent turns'}
+          </button>
+        )}
       </section>
 
       <section className="sidebar__section card">

@@ -19,7 +19,7 @@ import { DEFAULTS, genId } from '@clausroom/protocol';
 import { HttpError, notFound, tooLarge, validation } from '../errors.js';
 import { getAuth, getRoomCtx, roomGuard } from '../auth.js';
 import { nowIso, toArtifact, type ApprovalRow, type ArtifactRow, type Store } from '../db.js';
-import { isArchive, matchesSecretNameGlob, sanitizeFilename } from '../policy.js';
+import { isArchive, matchesSecretNameGlob, redactSecrets, sanitizeFilename } from '../policy.js';
 import { createMessage, publishMessage } from '../messageService.js';
 import { withLazyExpiry } from './approvals.js';
 import type { WsHub } from '../ws.js';
@@ -28,6 +28,13 @@ import { h, parse } from './util.js';
 
 const APPROVAL_REQUIRED_MESSAGE =
   'This upload requires an approved artifact_upload approval. Call room_request_human_approval first.';
+
+const QUOTA_EXCEEDED_MESSAGE =
+  'Room storage quota exceeded. Wait for older artifacts to expire or ask the room owner to raise AGENT_ROOM_ROOM_STORAGE_BYTES.';
+
+const EXPIRED_OR_DELETED_MESSAGE = 'Artifact expired or deleted.';
+
+const DAY_MS = 86_400_000;
 
 const UploadFieldsSchema = z.object({
   description: z.string().max(DEFAULTS.MAX_BODY_CHARS).optional(),
@@ -178,6 +185,16 @@ export function artifactRoutes(store: Store, hub: WsHub, config: ServerConfig): 
         const storagePath = path.join(destDir, `${sha256}__${sanitized}`);
         fs.renameSync(file.path, storagePath);
 
+        const createdAt = nowIso();
+        // Retention (docs/API-CONTRACT.md §5): expires_at = created_at +
+        // retention days (0 = immediate expiry); null when retention is
+        // disabled ('off' or negative) — the artifact never expires.
+        const expiresAt =
+          config.artifactRetentionDays === null
+            ? null
+            : new Date(
+                Date.parse(createdAt) + config.artifactRetentionDays * DAY_MS,
+              ).toISOString();
         const row: ArtifactRow = {
           id: artifactId,
           room_id: room.id,
@@ -188,25 +205,48 @@ export function artifactRoutes(store: Store, hub: WsHub, config: ServerConfig): 
           sha256,
           storage_path: storagePath,
           approval_id: approvalId ?? null,
-          created_at: nowIso(),
-          expires_at: null,
+          created_at: createdAt,
+          expires_at: expiresAt,
+          deleted_at: null,
         };
-        // The artifact row, its mandatory artifact_uploaded message, and the
-        // approval consumption commit atomically; the broadcast + MSG log line
-        // happen only after the transaction commits. The auto-message bypasses
+        // The quota check, artifact row, its mandatory artifact_uploaded
+        // message, and the approval consumption commit atomically; the
+        // broadcast + MSG log line happen only after the transaction commits.
+        // On quota failure the transaction rolls back, so nothing is written
+        // and any supplied approval is NOT consumed. The auto-message bypasses
         // agent pause/turn/rate checks (the agent gate is the approval gate).
-        const message = store.transaction(() => {
-          store.insertArtifact(row);
-          if (consumeApprovalId) store.consumeApproval(consumeApprovalId, row.created_at);
-          return createMessage(store, {
-            roomId: room.id,
-            sender: auth.user,
-            messageType: 'artifact_uploaded',
-            bodyMarkdown: description ?? sanitized,
-            artifactIds: [artifactId],
-            recipientIds: [],
+        let message;
+        try {
+          message = store.transaction(() => {
+            // Sum of non-deleted artifact bytes, computed inside the insert
+            // transaction so concurrent uploads cannot both squeeze under.
+            const used = store.sumActiveArtifactBytes(room.id);
+            if (used + sizeBytes > config.roomStorageBytes) {
+              throw new HttpError(413, 'quota_exceeded', QUOTA_EXCEEDED_MESSAGE);
+            }
+            store.insertArtifact(row);
+            if (consumeApprovalId) store.consumeApproval(consumeApprovalId, row.created_at);
+            return createMessage(store, {
+              roomId: room.id,
+              sender: auth.user,
+              messageType: 'artifact_uploaded',
+              // The auto-message body is redacted like any posted message.
+              bodyMarkdown: redactSecrets(description ?? sanitized),
+              artifactIds: [artifactId],
+              recipientIds: [],
+            });
           });
-        });
+        } catch (err) {
+          // The file was already moved into place; a rolled-back transaction
+          // (e.g. quota_exceeded) must not leave an orphaned file behind.
+          removeIfExists(storagePath);
+          try {
+            fs.rmdirSync(destDir);
+          } catch {
+            // best-effort only
+          }
+          throw err;
+        }
         publishMessage(hub, message);
 
         res.status(201).json({ artifact: toArtifact(row), message });
@@ -246,6 +286,11 @@ export function artifactRoutes(store: Store, hub: WsHub, config: ServerConfig): 
       const artifactId = req.params.artifactId;
       const row = artifactId ? store.getArtifactInRoom(room.id, artifactId) : undefined;
       if (!row) throw notFound('No such artifact in this room.');
+      // Deleted or expired (even before the sweep runs) -> 404. Metadata
+      // routes keep returning the row; only the download goes dark.
+      if (row.deleted_at !== null || (row.expires_at !== null && row.expires_at <= nowIso())) {
+        throw notFound(EXPIRED_OR_DELETED_MESSAGE);
+      }
       if (!fs.existsSync(row.storage_path)) {
         throw notFound('Artifact file is missing from storage.');
       }

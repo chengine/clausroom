@@ -12,7 +12,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "npm run build -w @clausroom/protocol && npm run build -w @clausroom/server && npm run build -w @clausroom/bridge && npm run build -w @clausroom/web",
+    "build": "npm run build -w @clausroom/protocol && npm run build -w @clausroom/server && npm run build -w clausroom-bridge && npm run build -w @clausroom/web",
     "dev:server": "npm run dev -w @clausroom/server",
     "dev:web": "npm run dev -w @clausroom/web",
     "start": "npm run start -w @clausroom/server",

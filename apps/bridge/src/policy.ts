@@ -297,6 +297,51 @@ export async function checkUploadPolicy(
 }
 
 /**
+ * Contract §13 [auto]: the engine workdir MUST realpath-resolve (symlinks and
+ * `~` expanded) inside one of [filesystem].roots, else the bridge refuses to
+ * start the auto responder. Same containment technique as checkUploadPolicy,
+ * with two deliberate differences: the target must be a directory (not a
+ * file), and the workdir may be exactly equal to a root (uploading the root
+ * itself makes no sense; working *in* the root does).
+ * Returns the fully resolved workdir path; throws PolicyError otherwise.
+ */
+export async function checkWorkdirPolicy(cfg: BridgeConfig, workdir: string): Promise<string> {
+  const candidate = path.resolve(expandHome(workdir));
+  let absPath: string;
+  try {
+    absPath = await fsp.realpath(candidate);
+  } catch {
+    throw new PolicyError(`auto.workdir does not exist or is unreadable: ${candidate}`);
+  }
+  const stat = await fsp.stat(absPath);
+  if (!stat.isDirectory()) {
+    throw new PolicyError(`auto.workdir is not a directory: ${absPath}`);
+  }
+  if (cfg.filesystem.roots.length === 0) {
+    throw new PolicyError(
+      'No [filesystem].roots are configured in bridge.toml. auto.workdir must resolve inside one of them; ' +
+        'configure roots before running the auto responder.',
+    );
+  }
+  for (const rootRaw of cfg.filesystem.roots) {
+    let root: string;
+    try {
+      root = await fsp.realpath(rootRaw);
+    } catch {
+      continue; // configured root does not exist; it cannot contain anything
+    }
+    const rel = path.relative(root, absPath);
+    if (rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))) {
+      return absPath;
+    }
+  }
+  throw new PolicyError(
+    `auto.workdir ${absPath} resolves outside the configured filesystem roots (${cfg.filesystem.roots.join(', ')}). ` +
+      'Refusing to start the auto responder.',
+  );
+}
+
+/**
  * Local checks for outgoing message text (spec §6.4): reject huge inline
  * base64-ish blobs and obvious secret material before any network call.
  * Returns a human-readable refusal string, or null when the body is OK.

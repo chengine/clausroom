@@ -58,6 +58,9 @@ export interface RoomRow {
   created_at: string;
   agents_paused: number;
   archived_at: string | null;
+  summary_markdown: string | null;
+  summary_updated_by: string | null;
+  summary_updated_at: string | null;
 }
 
 export interface ParticipantRow {
@@ -79,6 +82,8 @@ export interface MessageRow {
   artifact_ids_json: string;
   reply_to_message_id: string | null;
   confidence: string | null;
+  /** JSON string array of decision-card choices, or NULL when unset. */
+  choices_json: string | null;
   created_at: string;
 }
 
@@ -100,6 +105,8 @@ export interface ArtifactRow {
   approval_id: string | null;
   created_at: string;
   expires_at: string | null;
+  /** Set by the retention sweep when the stored file is unlinked. */
+  deleted_at: string | null;
 }
 
 export interface ApprovalRow {
@@ -153,6 +160,9 @@ export function toRoom(row: RoomRow): Room {
     created_at: row.created_at,
     agents_paused: row.agents_paused === 1,
     archived_at: row.archived_at,
+    summary_markdown: row.summary_markdown,
+    summary_updated_by: row.summary_updated_by,
+    summary_updated_at: row.summary_updated_at,
   };
 }
 
@@ -178,6 +188,13 @@ function parseJsonArray(json: string): string[] {
   return [];
 }
 
+/** messages.choices_json: JSON string array, or NULL == "no choices" (wire null). */
+function parseChoices(json: string | null): string[] | null {
+  if (json === null) return null;
+  const parsed = parseJsonArray(json);
+  return parsed.length > 0 ? parsed : null;
+}
+
 export function toMessage(row: MessageJoinedRow): Message {
   return {
     id: row.id,
@@ -193,6 +210,7 @@ export function toMessage(row: MessageJoinedRow): Message {
     artifact_ids: parseJsonArray(row.artifact_ids_json),
     reply_to_message_id: row.reply_to_message_id,
     confidence: (row.confidence as Message['confidence']) ?? null,
+    choices: parseChoices(row.choices_json),
     created_at: row.created_at,
   };
 }
@@ -209,6 +227,7 @@ export function toArtifact(row: ArtifactRow): Artifact {
     approval_id: row.approval_id,
     created_at: row.created_at,
     expires_at: row.expires_at,
+    deleted_at: row.deleted_at,
   };
 }
 
@@ -251,12 +270,15 @@ CREATE TABLE IF NOT EXISTS users (
 );
 
 CREATE TABLE IF NOT EXISTS rooms (
-  id            TEXT PRIMARY KEY,
-  name          TEXT NOT NULL,
-  created_by    TEXT NOT NULL REFERENCES users(id),
-  created_at    TEXT NOT NULL,
-  agents_paused INTEGER NOT NULL DEFAULT 0,
-  archived_at   TEXT
+  id                 TEXT PRIMARY KEY,
+  name               TEXT NOT NULL,
+  created_by         TEXT NOT NULL REFERENCES users(id),
+  created_at         TEXT NOT NULL,
+  agents_paused      INTEGER NOT NULL DEFAULT 0,
+  archived_at        TEXT,
+  summary_markdown   TEXT,
+  summary_updated_by TEXT REFERENCES users(id),
+  summary_updated_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS room_participants (
@@ -279,6 +301,7 @@ CREATE TABLE IF NOT EXISTS messages (
   artifact_ids_json   TEXT NOT NULL DEFAULT '[]',
   reply_to_message_id TEXT REFERENCES messages(id),
   confidence          TEXT CHECK (confidence IN ('low','medium','high')),
+  choices_json        TEXT,
   created_at          TEXT NOT NULL
 );
 
@@ -293,7 +316,8 @@ CREATE TABLE IF NOT EXISTS artifacts (
   storage_path TEXT NOT NULL,
   approval_id  TEXT REFERENCES approvals(id),
   created_at   TEXT NOT NULL,
-  expires_at   TEXT
+  expires_at   TEXT,
+  deleted_at   TEXT
 );
 
 CREATE TABLE IF NOT EXISTS approvals (
@@ -350,11 +374,23 @@ export class Store {
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
     this.db.exec(SCHEMA_SQL);
-    // Migration: approvals.consumed_at was added after the first release;
-    // CREATE TABLE IF NOT EXISTS does not extend existing tables.
-    const approvalCols = this.db.pragma('table_info(approvals)') as Array<{ name: string }>;
-    if (!approvalCols.some((c) => c.name === 'consumed_at')) {
-      this.db.exec('ALTER TABLE approvals ADD COLUMN consumed_at TEXT');
+    // Migrations: columns added after the first release; CREATE TABLE IF NOT
+    // EXISTS does not extend existing tables. All new columns are nullable, so
+    // plain ADD COLUMN suffices and pre-existing rows read as NULL ("unset").
+    this.addColumnIfMissing('approvals', 'consumed_at', 'TEXT');
+    // v0.1: pinned room summary, decision-card choices, retention sweep marker.
+    this.addColumnIfMissing('rooms', 'summary_markdown', 'TEXT');
+    this.addColumnIfMissing('rooms', 'summary_updated_by', 'TEXT REFERENCES users(id)');
+    this.addColumnIfMissing('rooms', 'summary_updated_at', 'TEXT');
+    this.addColumnIfMissing('messages', 'choices_json', 'TEXT');
+    this.addColumnIfMissing('artifacts', 'deleted_at', 'TEXT');
+  }
+
+  /** Migration-safe ALTER TABLE … ADD COLUMN guarded by a pragma table_info check. */
+  private addColumnIfMissing(table: string, column: string, definition: string): void {
+    const cols = this.db.pragma(`table_info(${table})`) as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === column)) {
+      this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
     }
   }
 
@@ -383,6 +419,15 @@ export class Store {
     return this.db
       .prepare("SELECT * FROM users WHERE kind = 'system' ORDER BY created_at ASC LIMIT 1")
       .get() as UserRow | undefined;
+  }
+
+  /** Admin humans (the bootstrap Host) — recipients of boot-time recovery invites. */
+  getAdminHumans(): UserRow[] {
+    return this.db
+      .prepare(
+        "SELECT * FROM users WHERE kind = 'human' AND is_admin = 1 ORDER BY created_at ASC, id ASC",
+      )
+      .all() as UserRow[];
   }
 
   insertUser(row: UserRow): void {
@@ -419,6 +464,16 @@ export class Store {
     this.db.prepare('UPDATE tokens SET used_at = ? WHERE id = ?').run(ts, id);
   }
 
+  /** Live (unrevoked) invite + session tokens of one user (lockout-recovery check). */
+  listUserAuthTokens(userId: string): TokenRow[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM tokens
+         WHERE user_id = ? AND kind IN ('invite','session') AND revoked_at IS NULL`,
+      )
+      .all(userId) as TokenRow[];
+  }
+
   /** Revoke all live invite + session tokens of a human user. */
   revokeHumanTokens(userId: string, ts: string): void {
     this.db
@@ -444,8 +499,10 @@ export class Store {
   insertRoom(row: RoomRow): void {
     this.db
       .prepare(
-        `INSERT INTO rooms (id, name, created_by, created_at, agents_paused, archived_at)
-         VALUES (@id, @name, @created_by, @created_at, @agents_paused, @archived_at)`,
+        `INSERT INTO rooms (id, name, created_by, created_at, agents_paused, archived_at,
+                            summary_markdown, summary_updated_by, summary_updated_at)
+         VALUES (@id, @name, @created_by, @created_at, @agents_paused, @archived_at,
+                 @summary_markdown, @summary_updated_by, @summary_updated_at)`,
       )
       .run(row);
   }
@@ -458,6 +515,21 @@ export class Store {
     this.db
       .prepare('UPDATE rooms SET agents_paused = ? WHERE id = ?')
       .run(paused ? 1 : 0, roomId);
+  }
+
+  /** Set (or clear, with null) the pinned summary; all three fields on every call. */
+  updateRoomSummary(
+    roomId: string,
+    summaryMarkdown: string | null,
+    updatedBy: string,
+    ts: string,
+  ): void {
+    this.db
+      .prepare(
+        `UPDATE rooms SET summary_markdown = ?, summary_updated_by = ?, summary_updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(summaryMarkdown, updatedBy, ts, roomId);
   }
 
   /** Rooms where the user is a participant, ascending by room created_at. */
@@ -548,9 +620,9 @@ export class Store {
     this.db
       .prepare(
         `INSERT INTO messages (id, room_id, sender_id, recipient_ids_json, message_type, body_markdown,
-                               artifact_ids_json, reply_to_message_id, confidence, created_at)
+                               artifact_ids_json, reply_to_message_id, confidence, choices_json, created_at)
          VALUES (@id, @room_id, @sender_id, @recipient_ids_json, @message_type, @body_markdown,
-                 @artifact_ids_json, @reply_to_message_id, @confidence, @created_at)`,
+                 @artifact_ids_json, @reply_to_message_id, @confidence, @choices_json, @created_at)`,
       )
       .run(row);
   }
@@ -616,9 +688,9 @@ export class Store {
     this.db
       .prepare(
         `INSERT INTO artifacts (id, room_id, uploaded_by, filename, mime_type, size_bytes, sha256,
-                                storage_path, approval_id, created_at, expires_at)
+                                storage_path, approval_id, created_at, expires_at, deleted_at)
          VALUES (@id, @room_id, @uploaded_by, @filename, @mime_type, @size_bytes, @sha256,
-                 @storage_path, @approval_id, @created_at, @expires_at)`,
+                 @storage_path, @approval_id, @created_at, @expires_at, @deleted_at)`,
       )
       .run(row);
   }
@@ -633,6 +705,36 @@ export class Store {
     return this.db
       .prepare('SELECT * FROM artifacts WHERE room_id = ? ORDER BY created_at ASC, id ASC')
       .all(roomId) as ArtifactRow[];
+  }
+
+  /**
+   * Sum of size_bytes over the room's non-deleted artifacts (expired-but-not-
+   * yet-swept rows still count). Run inside the upload transaction so
+   * concurrent uploads cannot both squeeze under the quota.
+   */
+  sumActiveArtifactBytes(roomId: string): number {
+    const row = this.db
+      .prepare(
+        'SELECT COALESCE(SUM(size_bytes), 0) AS total FROM artifacts WHERE room_id = ? AND deleted_at IS NULL',
+      )
+      .get(roomId) as { total: number };
+    return row.total;
+  }
+
+  /** Artifacts due for the retention sweep: live rows whose expires_at has passed. */
+  listExpiredArtifacts(nowTs: string): ArtifactRow[] {
+    return this.db
+      .prepare(
+        'SELECT * FROM artifacts WHERE deleted_at IS NULL AND expires_at IS NOT NULL AND expires_at <= ?',
+      )
+      .all(nowTs) as ArtifactRow[];
+  }
+
+  /** Mark a swept artifact deleted (row is kept; only the file is gone). */
+  markArtifactDeleted(artifactId: string, ts: string): void {
+    this.db
+      .prepare('UPDATE artifacts SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL')
+      .run(ts, artifactId);
   }
 
   // --- approvals -----------------------------------------------------------------

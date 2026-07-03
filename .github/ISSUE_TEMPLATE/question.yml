@@ -1,0 +1,36 @@
+name: Question
+description: Ask about setup, configuration, or how something works.
+labels: ["question"]
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question
+      description: >
+        What are you trying to do? Check the README, `docs/API-CONTRACT.md`,
+        and `examples/` first — link to what you already read if relevant.
+    validations:
+      required: true
+  - type: input
+    id: server-version
+    attributes:
+      label: Server version
+      description: clausroom version/commit, if relevant.
+      placeholder: v0.1.0
+    validations:
+      required: false
+  - type: input
+    id: bridge-version
+    attributes:
+      label: Bridge version
+      description: clausroom-bridge version/commit, if relevant.
+      placeholder: v0.1.0
+    validations:
+      required: false
+  - type: input
+    id: os
+    attributes:
+      label: Operating system(s)
+      placeholder: Ubuntu 24.04 (server), macOS 15 (bridge)
+    validations:
+      required: false

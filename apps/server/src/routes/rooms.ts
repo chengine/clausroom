@@ -29,6 +29,9 @@ export function roomRoutes(store: Store, config: ServerConfig): Router {
         created_at: now,
         agents_paused: 0,
         archived_at: null,
+        summary_markdown: null,
+        summary_updated_by: null,
+        summary_updated_at: null,
       };
       store.transaction(() => {
         store.insertRoom(room);

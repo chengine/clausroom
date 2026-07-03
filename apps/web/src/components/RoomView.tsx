@@ -3,7 +3,7 @@ import { DEFAULTS, type Approval, type Message, type User } from '@clausroom/pro
 import { errorText } from '../api.js';
 import { buildColorMap, colorFor } from '../colors.js';
 import { effectiveOrigin } from '../storage.js';
-import { agentTurnRun, useRoomState } from '../useRoomState.js';
+import { CONTINUE_MESSAGE_BODY, agentTurnRun, useRoomState } from '../useRoomState.js';
 import type { ConnectionState } from '../ws.js';
 import { ApprovalCard } from './ApprovalCard.js';
 import { Composer } from './Composer.js';
@@ -24,7 +24,7 @@ interface RoomViewProps {
   roomId: string;
   me: User;
   onBack: () => void;
-  onUnauthorized: () => void;
+  onUnauthorized: (err?: unknown) => void;
 }
 
 type TimelineItem =
@@ -92,7 +92,38 @@ export function RoomView({ token, roomId, me, onBack, onUnauthorized }: RoomView
   const myParticipant = state.participants.find((p) => p.user_id === me.id);
   const canSend = myParticipant?.can_send ?? false;
   const iAmOwner = state.myRole === 'owner';
+  const iAmHuman = me.kind === 'human' && state.myRole !== 'observer';
   const serverUrl = state.publicBaseUrl ?? effectiveOrigin();
+
+  const workingSet = useMemo(() => new Set(state.workingUserIds), [state.workingUserIds]);
+
+  // Decision cards: card message id -> the choice a human answered with.
+  // A card counts as answered once any human message at/after it in the room
+  // order (button click or typed) has a body exactly equal to one of its
+  // choices (docs/API-CONTRACT.md §4); the earliest such message wins.
+  const answeredChoices = useMemo(() => {
+    const map = new Map<string, string>();
+    const openCards: Message[] = [];
+    for (const m of state.messages) {
+      if (m.sender.kind === 'human') {
+        for (const card of openCards) {
+          if (!map.has(card.id) && card.choices?.includes(m.body_markdown)) {
+            map.set(card.id, m.body_markdown);
+          }
+        }
+      }
+      if (m.choices && m.choices.length > 0) openCards.push(m);
+    }
+    return map;
+  }, [state.messages]);
+
+  async function chooseOption(message: Message, choice: string) {
+    try {
+      await actions.sendMessage(choice, [], message.id);
+    } catch (err) {
+      setActionError(`Could not send your choice: ${errorText(err)}`);
+    }
+  }
 
   // --- auto-scroll pinned to bottom, with a "new messages" pill when away ---
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -272,6 +303,12 @@ export function RoomView({ token, roomId, me, onBack, onUnauthorized }: RoomView
                   nameOf={nameOf}
                   messageById={(id) => messagesById.get(id)}
                   artifactById={(id) => state.artifacts[id]}
+                  answeredChoice={answeredChoices.get(item.message.id) ?? null}
+                  canChoose={iAmHuman && canSend}
+                  onChoose={(choice) => chooseOption(item.message, choice)}
+                  senderWorking={
+                    item.message.sender.kind === 'agent' && workingSet.has(item.message.sender.id)
+                  }
                   onDownloadArtifact={(artifact) =>
                     void actions
                       .downloadArtifact(artifact)
@@ -317,15 +354,20 @@ export function RoomView({ token, roomId, me, onBack, onUnauthorized }: RoomView
         </main>
 
         <Sidebar
+          room={state.room}
           participants={state.participants}
           onlineUserIds={state.onlineUserIds}
+          workingUserIds={workingSet}
           meId={me.id}
-          iAmHuman={me.kind === 'human' && state.myRole !== 'observer'}
+          iAmHuman={iAmHuman}
+          canSend={canSend}
           colorOf={colorOf}
           nameOf={nameOf}
           turnRun={turnRun}
           maxTurns={state.maxAutoTurns ?? DEFAULTS.MAX_AUTO_TURNS}
           approvals={state.approvals}
+          onUpdateSummary={actions.updateSummary}
+          onContinue={() => actions.sendMessage(CONTINUE_MESSAGE_BODY, [])}
           onSetParticipantPaused={actions.setParticipantPaused}
           onRespondApproval={actions.respondApproval}
           onActionError={setActionError}

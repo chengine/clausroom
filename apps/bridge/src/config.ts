@@ -79,14 +79,96 @@ const FilesystemSectionSchema = z.object({
   downloads_dir: z.string().min(1).optional(),
 });
 
+/** Engines supported by `clausroom-bridge auto` (contract §13 `[auto]`). */
+export const AUTO_ENGINES = ['claude', 'codex', 'custom'] as const;
+export type AutoEngine = (typeof AUTO_ENGINES)[number];
+
+/**
+ * The `[auto]` table (contract §13). Only the `auto` subcommand reads it —
+ * `mcp`/`check` ignore it entirely, so it is carried through BridgeConfigSchema
+ * as `unknown` and validated lazily by parseAutoConfig(). A broken [auto]
+ * table must never stop the MCP server from starting.
+ */
+const AutoSectionSchema = z.object({
+  engine: z.enum(AUTO_ENGINES, {
+    errorMap: () => ({
+      message: `auto.engine must be one of: ${AUTO_ENGINES.join(', ')}`,
+    }),
+  }),
+  /** Engine working directory. MUST realpath-resolve inside a [filesystem].roots entry. */
+  workdir: z.string().min(1, 'auto.workdir is required'),
+  /** Tools granted to the engine; read-only by default, on purpose. */
+  allowed_tools: z.array(z.string().min(1)).default(['Read', 'Grep', 'Glob']),
+  /** Model override passed to the engine; engine default when unset. */
+  model: z.string().min(1).optional(),
+  /** Engine-internal turn cap per run. */
+  max_turns: z.number().int().positive().default(25),
+  /** Wall-clock cap per engine run; on expiry the run is killed, no reply posted. */
+  timeout_seconds: z.number().int().positive().default(300),
+  /** Max recent room messages included in the composed prompt. */
+  max_context_messages: z.number().int().positive().default(30),
+  /** 'addressed': recipient_ids includes me, or empty and sender != me. 'mentions_only': explicit only. */
+  respond_to: z.enum(['addressed', 'mentions_only']).default('addressed'),
+  /** argv array for engine = 'custom' (never run through a shell). */
+  custom_command: z.array(z.string().min(1)).default([]),
+  /** Extra argv appended to the engine CLI invocation. */
+  extra_args: z.array(z.string()).default([]),
+  /** When true, skip the prompt scaffolding: the triggering message body is the prompt. */
+  bare: z.boolean().default(false),
+  /** Per-run budget cap for engines that support one; unset = no cap. */
+  max_budget_usd: z.number().positive().optional(),
+});
+
+export type AutoConfig = z.infer<typeof AutoSectionSchema>;
+
 export const BridgeConfigSchema = z.object({
   identity: IdentitySchema,
   room: RoomSectionSchema,
   policy: PolicySectionSchema.default({}),
   filesystem: FilesystemSectionSchema.default({}),
+  /** Raw [auto] table; validated only by the `auto` subcommand (parseAutoConfig). */
+  auto: z.unknown().optional(),
 });
 
 export type BridgeConfig = z.infer<typeof BridgeConfigSchema>;
+
+/**
+ * Validate the `[auto]` table for `clausroom-bridge auto` (contract §13).
+ * Throws ConfigError when the table is missing or invalid. The workdir is
+ * expanded/resolved here; its roots-containment check needs the filesystem and
+ * lives in policy.ts (checkWorkdirPolicy) because it must resolve symlinks.
+ */
+export function parseAutoConfig(cfg: BridgeConfig): AutoConfig {
+  if (cfg.auto === undefined) {
+    throw new ConfigError(
+      'The [auto] section is missing from bridge.toml — it is required for `clausroom-bridge auto`.\n' +
+        'Minimal example:\n  [auto]\n  engine  = "claude"\n  workdir = "/path/inside/a/filesystem/root"\n' +
+        'See docs/API-CONTRACT.md §13 for the full reference.',
+    );
+  }
+  const parsed = AutoSectionSchema.safeParse(cfg.auto);
+  if (!parsed.success) {
+    const issues = parsed.error.issues
+      .map((i) => `  - auto.${i.path.join('.') || '(root)'}: ${i.message}`)
+      .join('\n');
+    throw new ConfigError(`Invalid [auto] section in bridge.toml:\n${issues}`);
+  }
+  const auto = parsed.data;
+  if (auto.engine === 'custom' && auto.custom_command.length === 0) {
+    throw new ConfigError(
+      'auto.engine = "custom" requires auto.custom_command — a non-empty argv array, ' +
+        'e.g. custom_command = ["/usr/local/bin/my-engine", "--answer"]. ' +
+        'The bridge writes the prompt to its stdin and posts its stdout as the reply.',
+    );
+  }
+  if (auto.engine !== 'custom' && auto.custom_command.length > 0) {
+    throw new ConfigError(
+      `auto.custom_command is only allowed when auto.engine = "custom" (engine is "${auto.engine}").`,
+    );
+  }
+  auto.workdir = path.resolve(expandHome(auto.workdir));
+  return auto;
+}
 
 /**
  * Load, parse, and validate the bridge config file.

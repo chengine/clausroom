@@ -14,7 +14,7 @@ import { authMiddleware, getAuth } from '../auth.js';
 import { nowIso, toRoom, toUser, type Store } from '../db.js';
 import { h, parse } from './util.js';
 
-export function authRoutes(store: Store): Router {
+export function authRoutes(store: Store, sessionTtlDays: number): Router {
   const router = Router();
 
   // No Authorization header required.
@@ -52,7 +52,7 @@ export function authRoutes(store: Store): Router {
 
   router.get(
     '/me',
-    authMiddleware(store),
+    authMiddleware(store, sessionTtlDays),
     h(async (req, res) => {
       const auth = getAuth(req);
       const rooms = store.listRoomsForUser(auth.user.id);

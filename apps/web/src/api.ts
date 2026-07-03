@@ -21,6 +21,7 @@ import {
   type PostMessageRequest,
   type Role,
   type Room,
+  type UpdateSummaryRequest,
   type User,
 } from '@clausroom/protocol';
 import { getServerBase } from './storage.js';
@@ -43,6 +44,15 @@ export class ApiClientError extends Error {
 
 export function isUnauthorized(err: unknown): boolean {
   return err instanceof ApiClientError && err.status === 401;
+}
+
+/**
+ * True for a 401 whose message mentions expiry (the sliding session TTL,
+ * docs/API-CONTRACT.md §1 rule 4) — the stored session is dead for good and
+ * the user needs a fresh invite token.
+ */
+export function isSessionExpired(err: unknown): boolean {
+  return err instanceof ApiClientError && err.status === 401 && /expir/i.test(err.message);
 }
 
 export function errorText(err: unknown): string {
@@ -92,7 +102,7 @@ function optionalNumber(value: unknown): number | undefined {
 // ---------------------------------------------------------------------------
 
 interface RequestOptions {
-  method?: 'GET' | 'POST';
+  method?: 'GET' | 'POST' | 'PUT';
   token?: string | null;
   body?: unknown;
 }
@@ -207,6 +217,23 @@ export async function getRoom(token: string, roomId: string): Promise<RoomDetail
     public_base_url: optionalString(data.public_base_url),
     max_auto_turns: optionalNumber(data.max_auto_turns),
   };
+}
+
+/**
+ * PUT /api/rooms/:id/summary — set (or clear, with null) the pinned room
+ * summary. Returns the updated Room (summary_* fields included).
+ */
+export async function updateSummary(
+  token: string,
+  roomId: string,
+  summaryMarkdown: string | null,
+): Promise<Room> {
+  const body: UpdateSummaryRequest = { summary_markdown: summaryMarkdown };
+  const data = asRecord(
+    await request(`/api/rooms/${roomId}/summary`, { method: 'PUT', token, body }),
+    'update summary',
+  );
+  return RoomSchema.parse(data.room);
 }
 
 export async function getMessages(
@@ -361,6 +388,18 @@ async function downloadBlob(token: string, path: string, filename: string): Prom
     throw new ApiClientError('network', 'Could not reach the server for the download.', 0);
   }
   if (!res.ok) {
+    // Surface the server's exact error message (e.g. "Artifact expired or
+    // deleted.") instead of a bare HTTP status.
+    let payload: unknown = null;
+    try {
+      payload = await res.json();
+    } catch {
+      // Non-JSON error body; fall through to the generic error below.
+    }
+    const parsed = ApiErrorSchema.safeParse(payload);
+    if (parsed.success) {
+      throw new ApiClientError(parsed.data.error.code, parsed.data.error.message, res.status);
+    }
     throw new ApiClientError('http_error', `Download failed (HTTP ${res.status}).`, res.status);
   }
   const blob = await res.blob();

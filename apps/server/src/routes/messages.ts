@@ -15,6 +15,7 @@ import { toMessage, type Store } from '../db.js';
 import {
   countTrailingAgentRun,
   hasInlineBlob,
+  redactSecrets,
   type MessageRateLimiter,
 } from '../policy.js';
 import { createAndBroadcastMessage } from '../messageService.js';
@@ -151,15 +152,20 @@ export function messageRoutes(
         );
       }
 
+      // Best-effort secret redaction (docs/API-CONTRACT.md §4): after
+      // validation, before storage and broadcast — the original never
+      // persists, and the redacted body is not re-validated against the
+      // length/inline-blob rules. `choices` entries are not scanned.
       const message = createAndBroadcastMessage(store, hub, {
         roomId: room.id,
         sender: auth.user,
         messageType: body.message_type,
-        bodyMarkdown: body.body_markdown,
+        bodyMarkdown: redactSecrets(body.body_markdown),
         recipientIds: body.recipient_ids,
         artifactIds,
         replyToMessageId: body.reply_to_message_id ?? null,
         confidence: body.confidence ?? null,
+        choices: body.choices ?? null,
       });
       rateLimiter.record(auth.user.id);
 

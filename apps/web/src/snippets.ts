@@ -49,11 +49,14 @@ export function claudeMcpAddCommand(): string {
   // `clausroom-bridge` is a private workspace bin and is never on PATH, so the
   // snippet must spawn the built entry point directly (same form as README.md
   // and examples/claude-code-setup.md). The path placeholder is the only part
-  // the remote human has to edit.
+  // the remote human has to edit. Once the bridge is published to npm, the
+  // commented npx line replaces the node path invocation.
   return [
     'claude mcp add --transport stdio clausroom \\',
     '  --env AGENT_ROOM_BRIDGE_TOKEN=$AGENT_ROOM_BRIDGE_TOKEN \\',
     '  -- node /path/to/clausroom/apps/bridge/dist/index.js mcp --config ~/.clausroom/bridge.toml',
+    '# Once clausroom-bridge is published to npm, use npx instead of the node path:',
+    '#   -- npx clausroom-bridge mcp --config ~/.clausroom/bridge.toml',
   ].join('\n');
 }
 

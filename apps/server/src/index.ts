@@ -3,10 +3,11 @@
  * WebSocket upgrade, listen. Binding stdout lines (docs/API-CONTRACT.md §2/§14):
  *
  *   CLAUSROOM_BOOTSTRAP_INVITE <arit_ token>   (first run only)
+ *   CLAUSROOM_RECOVERY_INVITE <arit_ token>    (only when an admin human is locked out, §2)
  *   CLAUSROOM_LISTENING <actual-port>          (every run, once listening)
  *   MSG <room_id> <sender_id> <message_type>   (every accepted message)
  *
- * Raw tokens are never logged except the one-time bootstrap invite line.
+ * Raw tokens are never logged except the one-time bootstrap/recovery invite lines.
  */
 import fs from 'node:fs';
 import http from 'node:http';
@@ -16,15 +17,17 @@ import multer from 'multer';
 import { genId, newInviteToken, sha256Hex } from '@clausroom/protocol';
 import { loadConfig } from './env.js';
 import { HttpError, notFound, tooLarge, validation } from './errors.js';
-import { nowIso, Store } from './db.js';
-import { authMiddleware } from './auth.js';
+import { nowIso, Store, type UserRow } from './db.js';
+import { authMiddleware, isSessionExpired } from './auth.js';
 import { MessageRateLimiter } from './policy.js';
 import { WsHub } from './ws.js';
+import { startRetentionSweep } from './retention.js';
 import { mountStatic, resolveWebDist } from './static.js';
 import { authRoutes } from './routes/auth.js';
 import { roomRoutes } from './routes/rooms.js';
 import { participantRoutes } from './routes/participants.js';
 import { pauseRoutes } from './routes/pause.js';
+import { summaryRoutes } from './routes/summary.js';
 import { messageRoutes } from './routes/messages.js';
 import { artifactRoutes } from './routes/artifacts.js';
 import { approvalRoutes } from './routes/approvals.js';
@@ -75,6 +78,44 @@ function bootstrap(store: Store): string | null {
   return inviteToken;
 }
 
+/**
+ * Owner-lockout recovery (docs/API-CONTRACT.md §2): if an admin human (the
+ * bootstrap Host) no longer holds ANY usable credential — every invite used or
+ * revoked, every session token revoked or TTL-expired — they could never get
+ * back in: minting a fresh invite requires an authenticated owner session,
+ * i.e. exactly what they lost. On startup, detect that state and mint a fresh
+ * single-use invite per locked-out admin, printed once like the bootstrap
+ * line. Restarting the server is the in-band recovery path.
+ */
+function recoverAdminAccess(
+  store: Store,
+  sessionTtlDays: number,
+): Array<{ user: UserRow; invite: string }> {
+  const recovered: Array<{ user: UserRow; invite: string }> = [];
+  const nowMs = Date.now();
+  for (const admin of store.getAdminHumans()) {
+    const usable = store.listUserAuthTokens(admin.id).some((t) =>
+      t.kind === 'invite' ? t.used_at === null : !isSessionExpired(t, sessionTtlDays, nowMs),
+    );
+    if (usable) continue;
+    const invite = newInviteToken();
+    store.insertToken({
+      id: genId('tok'),
+      kind: 'invite',
+      token_hash: sha256Hex(invite),
+      user_id: admin.id,
+      room_id: null,
+      name: 'recovery',
+      created_at: nowIso(),
+      last_used_at: null,
+      used_at: null,
+      revoked_at: null,
+    });
+    recovered.push({ user: admin, invite });
+  }
+  return recovered;
+}
+
 function main(): void {
   const config = loadConfig(process.env);
 
@@ -83,10 +124,21 @@ function main(): void {
   const bootstrapInvite = bootstrap(store);
   if (bootstrapInvite) {
     console.log(`CLAUSROOM_BOOTSTRAP_INVITE ${bootstrapInvite}`);
+  } else {
+    for (const { user, invite } of recoverAdminAccess(store, config.sessionTtlDays)) {
+      console.log(`CLAUSROOM_RECOVERY_INVITE ${invite}`);
+      console.error(
+        `[clausroom] every credential of admin "${user.display_name}" (${user.id}) was ` +
+          'expired, used, or revoked — minted the fresh single-use invite above; ' +
+          'log in with it via the web UI.',
+      );
+    }
   }
 
-  const hub = new WsHub(store);
+  const hub = new WsHub(store, config.sessionTtlDays);
   const rateLimiter = new MessageRateLimiter();
+  // Retention sweep: once on boot, then every 10 minutes (unref()'d interval).
+  const stopRetentionSweep = startRetentionSweep(store);
 
   const app = express();
   app.disable('x-powered-by');
@@ -99,12 +151,13 @@ function main(): void {
   app.use(express.json({ limit: 1048576 }));
 
   // /api/auth/login (no auth) + /api/me (self-authenticated).
-  app.use('/api', authRoutes(store));
+  app.use('/api', authRoutes(store, config.sessionTtlDays));
   // Everything else under /api requires a session or bridge token.
-  app.use('/api', authMiddleware(store));
+  app.use('/api', authMiddleware(store, config.sessionTtlDays));
   app.use('/api', roomRoutes(store, config));
   app.use('/api', participantRoutes(store));
   app.use('/api', pauseRoutes(store, hub));
+  app.use('/api', summaryRoutes(store, hub));
   app.use('/api', messageRoutes(store, hub, config, rateLimiter));
   app.use('/api', artifactRoutes(store, hub, config));
   app.use('/api', approvalRoutes(store, hub));
@@ -156,11 +209,12 @@ function main(): void {
     console.log(`CLAUSROOM_LISTENING ${port}`);
   });
 
-  // Graceful shutdown: close ws server, http server, then the database.
+  // Graceful shutdown: stop the sweep, close ws server, http server, then the database.
   let shuttingDown = false;
   const shutdown = () => {
     if (shuttingDown) return;
     shuttingDown = true;
+    stopRetentionSweep();
     hub.close();
     server.close(() => {
       store.close();
