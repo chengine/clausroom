@@ -61,9 +61,14 @@ const BOOL_FLAGS = new Set([
   'write-student-config',
   'non-interactive',
   'yes',
+  'no-serve',
+  'no-open',
   'help',
   'h',
 ]);
+
+const HOST_SESSION_FILE = () => path.join(os.homedir(), '.clausroom', 'host-session.json');
+const TAILSCALE_ADMIN_URL = 'https://login.tailscale.com/admin/machines';
 
 // ---------------------------------------------------------------------------
 // tiny utilities
@@ -211,6 +216,46 @@ async function probeHealth(baseUrl) {
   return false;
 }
 
+/** Is this session token still good against this server? (GET /api/me -> 200). */
+async function validateSession(baseUrl, sessionToken) {
+  try {
+    const res = await request('GET', `${baseUrl}/api/me`, { token: sessionToken, timeoutMs: 5000 });
+    return res.status === 200;
+  } catch {
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// saved host session (~/.clausroom/host-session.json) — session token only
+// ---------------------------------------------------------------------------
+
+function hostSessionPath() {
+  return HOST_SESSION_FILE();
+}
+
+/** Read {server?, session_token} or null. Never throws. */
+async function readHostSession() {
+  try {
+    const raw = await fsp.readFile(hostSessionPath(), 'utf8');
+    const data = JSON.parse(raw);
+    if (data && typeof data.session_token === 'string' && data.session_token.startsWith('arst_')) {
+      return data;
+    }
+  } catch {
+    /* missing/corrupt — treat as none */
+  }
+  return null;
+}
+
+/** Persist the host session (0600, no other secrets). */
+async function writeHostSession({ server, session_token }) {
+  const p = hostSessionPath();
+  await fsp.mkdir(path.dirname(p), { recursive: true });
+  const body = JSON.stringify({ server, session_token }, null, 2) + '\n';
+  await fsp.writeFile(p, body, { mode: 0o600 });
+}
+
 // ---------------------------------------------------------------------------
 // server lifecycle (only used with --start)
 // ---------------------------------------------------------------------------
@@ -218,13 +263,18 @@ async function probeHealth(baseUrl) {
 let serverProc = null;
 let startedServer = false;
 let cleanupRegistered = false;
+let upMode = false;
 
 function registerCleanup() {
   if (cleanupRegistered) return;
   cleanupRegistered = true;
   const onSignal = (signal) => {
-    info(`\n[host-setup] received ${signal}, cleaning up...`);
+    info(`\n[host-setup] received ${signal}, stopping the server...`);
     stopServerSync();
+    if (upMode) {
+      info('[host-setup] server stopped; run `npm run up` again to resume. ' +
+        '(Left the persistent `tailscale serve --bg` config in place.)');
+    }
     process.exit(signal === 'SIGINT' ? 130 : 143);
   };
   process.on('SIGINT', () => onSignal('SIGINT'));
@@ -310,6 +360,115 @@ async function startServer() {
     });
   });
   return result;
+}
+
+/** The loopback URL this process should use to reach a server on `port`. */
+function loopbackBaseUrl(port) {
+  const hostEnv = process.env.AGENT_ROOM_HOST;
+  const connectHost =
+    !hostEnv || hostEnv === '0.0.0.0' || hostEnv === '::' || hostEnv === '[::]' ? '127.0.0.1' : hostEnv;
+  return `http://${connectHost}:${port}`;
+}
+
+// ---------------------------------------------------------------------------
+// tailscale + browser (best-effort child processes; never abort the flow)
+// ---------------------------------------------------------------------------
+
+/** Run a child, capture stdout/stderr. Never throws; ENOENT -> {ok:false}. */
+function runCmd(cmd, args, { timeoutMs = 10_000 } = {}) {
+  return new Promise((resolve) => {
+    let proc;
+    try {
+      proc = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (err) {
+      resolve({ ok: false, code: -1, stdout: '', stderr: String(err) });
+      return;
+    }
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    const done = (r) => {
+      if (settled) return;
+      settled = true;
+      resolve(r);
+    };
+    const timer = setTimeout(() => {
+      try {
+        proc.kill('SIGKILL');
+      } catch {
+        /* ignore */
+      }
+      done({ ok: false, code: -1, stdout, stderr: `${stderr}\n[timed out after ${timeoutMs}ms]` });
+    }, timeoutMs);
+    proc.stdout.on('data', (d) => {
+      stdout += d;
+    });
+    proc.stderr.on('data', (d) => {
+      stderr += d;
+    });
+    proc.on('error', (err) => {
+      clearTimeout(timer);
+      done({ ok: false, code: -1, stdout, stderr: String(err) });
+    });
+    proc.on('close', (code) => {
+      clearTimeout(timer);
+      done({ ok: code === 0, code, stdout, stderr });
+    });
+  });
+}
+
+/** Inspect tailscale: is the CLI present, is the backend running, what DNS name? */
+async function detectTailscale() {
+  const res = await runCmd('tailscale', ['status', '--json']);
+  if (!res.ok) return { available: false, backendRunning: false, dnsName: null };
+  let status;
+  try {
+    status = JSON.parse(res.stdout);
+  } catch {
+    return { available: true, backendRunning: false, dnsName: null };
+  }
+  const backendRunning = status && status.BackendState === 'Running';
+  const rawName = status && status.Self && status.Self.DNSName ? String(status.Self.DNSName) : '';
+  const dnsName = rawName ? rawName.replace(/\.+$/, '') : null; // strip trailing dot(s)
+  return { available: true, backendRunning: Boolean(backendRunning), dnsName };
+}
+
+/** Background a persistent reverse proxy: tailscale serve --bg --https=443. */
+async function tailscaleServe(port) {
+  return runCmd('tailscale', ['serve', '--bg', '--https=443', `localhost:${port}`], { timeoutMs: 20_000 });
+}
+
+/** Best-effort open a URL in the default browser. Any failure is a silent no-op. */
+async function openBrowser(url) {
+  const attempts = [
+    ['wslview', [url]],
+    ['explorer.exe', [url]],
+    ['xdg-open', [url]],
+    ['open', [url]],
+    ['cmd.exe', ['/c', 'start', '', url]],
+  ];
+  for (const [cmd, args] of attempts) {
+    const ok = await new Promise((resolve) => {
+      let proc;
+      try {
+        proc = spawn(cmd, args, { stdio: 'ignore', detached: true });
+      } catch {
+        resolve(false);
+        return;
+      }
+      proc.on('error', () => resolve(false));
+      proc.on('spawn', () => {
+        try {
+          proc.unref();
+        } catch {
+          /* ignore */
+        }
+        resolve(true);
+      });
+    });
+    if (ok) return true;
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -442,7 +601,8 @@ function teacherOnboarding({
 const HELP = `clausroom host setup wizard
 
 Usage:
-  npm run host -- [options]
+  npm run host -- [options]        # this guided wizard (probe/--start a server)
+  npm run up                       # one-command launch (see: host-setup.mjs up --help)
   node scripts/host-setup.mjs [options]
 
 Server:
@@ -492,22 +652,56 @@ Behavior:
   --non-interactive           Never prompt; require values via flags/env.
   --yes                       Don't prompt; accept defaults / confirm writes.
   --help                      Show this help.
+
+Subcommands:
+  up                          One-command host launch (start server + tailscale
+                              serve + create room + emit onboarding + stay up).
+                              See: node scripts/host-setup.mjs up --help
 `;
 
-async function main() {
-  const { flags } = parseArgs(process.argv.slice(2));
+const UP_HELP = `clausroom — npm run up (one-command host launch)
 
-  if (flags.help || flags.h) {
-    process.stdout.write(HELP);
-    return;
-  }
+Starts the built server, exposes it via Tailscale Serve, creates a room and its
+three participants, prints the teacher onboarding message + your own attach line,
+opens the browser, and stays up streaming server logs until you press Ctrl-C.
 
-  const assumeYes = Boolean(flags.yes);
-  const interactive = Boolean(process.stdin.isTTY) && !flags['non-interactive'] && !assumeYes;
-  const rl = interactive
-    ? rlPromises.createInterface({ input: process.stdin, output: process.stderr })
-    : null;
+Usage:
+  npm run up
+  node scripts/host-setup.mjs up [options]
 
+Options:
+  --no-serve                  Don't run 'tailscale serve'; use a loopback URL and
+                              print the command to run yourself.
+  --no-open                   Don't try to open the browser.
+  --non-interactive           Never prompt; take names from flags/env or defaults.
+  --invite <arit_...>         Login invite to use when no saved session is valid.
+                              Normally auto-detected from the server's bootstrap/
+                              recovery output. (env: CLAUSROOM_HOST_INVITE)
+  --room-name <name>          (env: CLAUSROOM_HOST_ROOM_NAME)  default "clausroom debug room"
+  --teacher-name <name>       (env: CLAUSROOM_HOST_TEACHER_NAME)  default "Teacher"
+  --student-name <name>       (env: CLAUSROOM_HOST_STUDENT_NAME)  default "Student"
+  --student-agent-name <name> (env: CLAUSROOM_HOST_STUDENT_AGENT_NAME)
+  --teacher-agent-name <name> (env: CLAUSROOM_HOST_TEACHER_AGENT_NAME)
+  --project-name <name>       (env: CLAUSROOM_HOST_PROJECT_NAME)
+  --student-project <path>    Project root for your bridge.toml.
+                              (env: CLAUSROOM_HOST_STUDENT_PROJECT)
+  --config-path <path>        Bridge config path shown in snippets. Default ${DEFAULT_CONFIG_PATH}.
+  --token-env <name>          Env var name for the bridge token. Default AGENT_ROOM_BRIDGE_TOKEN.
+  --repo-url <url>            (env: CLAUSROOM_HOST_REPO_URL)
+  --help                      Show this help.
+
+Session reuse: a validated host session is cached at ~/.clausroom/host-session.json
+(mode 0600, session token only) and reused on the next 'npm run up'.
+
+Server env (AGENT_ROOM_*): AGENT_ROOM_PORT (0 = ephemeral), AGENT_ROOM_DB,
+AGENT_ROOM_ARTIFACT_DIR, AGENT_ROOM_HOST — identical to 'npm start'.
+
+Readiness sentinel: prints 'CLAUSROOM_UP_READY <url>' on stdout once the room is
+live and every artifact has been emitted.
+`;
+
+/** flagOrEnv + ask helpers bound to a parsed flag set + interactive rl. */
+function makeHelpers(flags, interactive, rl) {
   const flagOrEnv = (flagKey, envKey) => {
     if (flags[flagKey] !== undefined && flags[flagKey] !== true) return String(flags[flagKey]);
     const v = envKey ? process.env[envKey] : undefined;
@@ -529,6 +723,326 @@ async function main() {
     return v;
   }
 
+  return { flagOrEnv, ask };
+}
+
+/**
+ * Create a room and its three participants (teacher human -> arit_, student's
+ * agent -> arbt_, teacher's agent owned by the teacher -> arbt_) over REST.
+ * Shared by the wizard and by `up`.
+ */
+async function createRoomWithParticipants(baseUrl, sessionToken, names) {
+  const { roomName, teacherName, studentAgentName, teacherAgentName } = names;
+
+  info(`[host-setup] creating room "${roomName}"...`);
+  const roomRes = expectStatus(
+    await request('POST', `${baseUrl}/api/rooms`, { token: sessionToken, json: { name: roomName } }),
+    201,
+    'create room',
+  );
+  const room = roomRes.data.room;
+  info(`[host-setup] room created: ${room.id}`);
+
+  info('[host-setup] adding the teacher (human)...');
+  const teacherRes = expectStatus(
+    await request('POST', `${baseUrl}/api/rooms/${room.id}/participants`, {
+      token: sessionToken,
+      json: { display_name: teacherName, kind: 'human', role: 'human' },
+    }),
+    201,
+    'add teacher',
+  );
+  const teacherInvite = teacherRes.data.invite_token;
+  const teacherUserId = teacherRes.data.participant.user_id;
+  if (!teacherInvite || !teacherInvite.startsWith('arit_')) {
+    fail(`teacher invite token missing/malformed: ${JSON.stringify(teacherRes.data).slice(0, 200)}`);
+  }
+
+  info("[host-setup] adding the student's agent (owned by you)...");
+  const studentAgentRes = expectStatus(
+    await request('POST', `${baseUrl}/api/rooms/${room.id}/participants`, {
+      token: sessionToken,
+      json: { display_name: studentAgentName, kind: 'agent', role: 'agent' },
+    }),
+    201,
+    'add student agent',
+  );
+  const studentBridgeToken = studentAgentRes.data.bridge_token;
+  if (!studentBridgeToken || !studentBridgeToken.startsWith('arbt_')) {
+    fail(`student bridge token missing/malformed: ${JSON.stringify(studentAgentRes.data).slice(0, 200)}`);
+  }
+
+  info("[host-setup] adding the teacher's agent (owned by the teacher)...");
+  const teacherAgentRes = expectStatus(
+    await request('POST', `${baseUrl}/api/rooms/${room.id}/participants`, {
+      token: sessionToken,
+      json: {
+        display_name: teacherAgentName,
+        kind: 'agent',
+        role: 'agent',
+        owner_user_id: teacherUserId,
+      },
+    }),
+    201,
+    'add teacher agent',
+  );
+  const teacherBridgeToken = teacherAgentRes.data.bridge_token;
+  if (!teacherBridgeToken || !teacherBridgeToken.startsWith('arbt_')) {
+    fail(`teacher bridge token missing/malformed: ${JSON.stringify(teacherAgentRes.data).slice(0, 200)}`);
+  }
+
+  return { room, teacherInvite, teacherUserId, studentBridgeToken, teacherBridgeToken };
+}
+
+/**
+ * `npm run up` — the one-command host launch. Reuses startServer / auth /
+ * createRoomWithParticipants / the artifact builders, adds tailscale serve,
+ * browser open, session caching, a readiness sentinel, and a foreground stay-up.
+ */
+async function runUp(flags) {
+  upMode = true;
+  const interactive = Boolean(process.stdin.isTTY) && !flags['non-interactive'];
+  const rl = interactive
+    ? rlPromises.createInterface({ input: process.stdin, output: process.stderr })
+    : null;
+  const { flagOrEnv, ask } = makeHelpers(flags, interactive, rl);
+
+  const tokenEnv = flagOrEnv('token-env') || 'AGENT_ROOM_BRIDGE_TOKEN';
+  const configPath = flagOrEnv('config-path', 'CLAUSROOM_HOST_CONFIG_PATH') || DEFAULT_CONFIG_PATH;
+  const noServe = Boolean(flags['no-serve']);
+  const noOpen = Boolean(flags['no-open']);
+
+  info('clausroom — npm run up');
+  info('======================');
+
+  try {
+    // --- 1/2. start the server (foreground for the life of the command) --
+    registerCleanup();
+    const started = await startServer(); // fails clearly if dist missing / times out
+    const serverPort = started.port;
+    const baseUrl = loopbackBaseUrl(serverPort);
+    info(`[host-setup] server is listening on ${baseUrl}`);
+
+    // --- 3. authenticate: reuse saved session, else exchange an invite ---
+    let sessionToken = null;
+    const saved = await readHostSession();
+    if (saved && (await validateSession(baseUrl, saved.session_token))) {
+      sessionToken = saved.session_token;
+      info(`[host-setup] reusing your saved host session (${hostSessionPath()}).`);
+    }
+    if (!sessionToken) {
+      const invite = flagOrEnv('invite', 'CLAUSROOM_HOST_INVITE') || started.invite || started.recovery;
+      if (!invite) {
+        fail(
+          'no valid saved session and the server printed no bootstrap/recovery invite. ' +
+            'If this room existed before, your saved session likely expired — restart the ' +
+            'server to mint a CLAUSROOM_RECOVERY_INVITE (printed on startup), or re-run ' +
+            'with --invite arit_....',
+        );
+      }
+      info('[host-setup] logging in with the invite token...');
+      const login = expectStatus(
+        await request('POST', `${baseUrl}/api/auth/login`, { json: { invite_token: invite } }),
+        200,
+        'login',
+      );
+      sessionToken = login.data.session_token;
+      if (typeof sessionToken !== 'string' || !sessionToken.startsWith('arst_')) {
+        fail(`login returned no valid session token: ${JSON.stringify(login.data).slice(0, 200)}`);
+      }
+      await writeHostSession({ server: baseUrl, session_token: sessionToken });
+      info(
+        `[host-setup] logged in as ${login.data.user.display_name}; saved session to ` +
+          `${hostSessionPath()} (mode 0600).`,
+      );
+    }
+
+    // --- 4. tailscale serve (unless --no-serve); degrade gracefully ------
+    const manualServeLine = `tailscale serve --bg --https=443 localhost:${serverPort}`;
+    let roomUrl;
+    let servedPublicly = false;
+    if (noServe) {
+      info('[host-setup] --no-serve: not touching tailscale; using a loopback URL.');
+      info('[host-setup] Expose it yourself when ready:');
+      info(`[host-setup]     ${manualServeLine}`);
+      roomUrl = `http://127.0.0.1:${serverPort}/`;
+    } else {
+      const ts = await detectTailscale();
+      if (ts.available && ts.backendRunning && ts.dnsName) {
+        info(`[host-setup] tailscale is up; exposing localhost:${serverPort} on :443...`);
+        const res = await tailscaleServe(serverPort);
+        if (res.ok) {
+          roomUrl = `https://${ts.dnsName}/`;
+          servedPublicly = true;
+          info(`[host-setup] tailscale serve is live: ${roomUrl}`);
+        } else {
+          info(
+            `[host-setup] WARNING: 'tailscale serve' failed (exit ${res.code}): ` +
+              `${(res.stderr || '').trim().slice(0, 200)}`,
+          );
+          info('[host-setup] falling back to a loopback URL. Run this yourself when ready:');
+          info(`[host-setup]     ${manualServeLine}`);
+          roomUrl = `http://127.0.0.1:${serverPort}/`;
+        }
+      } else {
+        const why = !ts.available
+          ? 'tailscale CLI not found'
+          : !ts.backendRunning
+            ? 'tailscale is installed but not logged in / not running'
+            : "could not read this machine's Tailscale DNS name";
+        info(`[host-setup] WARNING: ${why}; skipping automatic exposure.`);
+        info('[host-setup] falling back to a loopback URL. Run this yourself once tailscale is ready:');
+        info(`[host-setup]     ${manualServeLine}`);
+        roomUrl = `http://127.0.0.1:${serverPort}/`;
+      }
+    }
+
+    // --- 5. room name + participant display names ------------------------
+    const roomName = await ask('room-name', 'CLAUSROOM_HOST_ROOM_NAME', {
+      prompt: 'Room name',
+      def: 'clausroom debug room',
+      required: true,
+    });
+    const studentName = await ask('student-name', 'CLAUSROOM_HOST_STUDENT_NAME', {
+      prompt: 'Your (student) display name',
+      def: 'Student',
+    });
+    const teacherName = await ask('teacher-name', 'CLAUSROOM_HOST_TEACHER_NAME', {
+      prompt: 'Teacher display name',
+      def: 'Teacher',
+    });
+    const studentAgentName = await ask('student-agent-name', 'CLAUSROOM_HOST_STUDENT_AGENT_NAME', {
+      prompt: 'Your agent display name',
+      def: `${studentName}'s Agent`,
+    });
+    const teacherAgentName = await ask('teacher-agent-name', 'CLAUSROOM_HOST_TEACHER_AGENT_NAME', {
+      prompt: 'Teacher agent display name',
+      def: `${teacherName}'s Agent`,
+    });
+    const projectName = await ask('project-name', 'CLAUSROOM_HOST_PROJECT_NAME', {
+      prompt: 'Project name (for the onboarding message)',
+      def: 'our project',
+    });
+    const repoUrl = flagOrEnv('repo-url', 'CLAUSROOM_HOST_REPO_URL') || DEFAULT_REPO_URL;
+    const studentProject =
+      flagOrEnv('student-project', 'CLAUSROOM_HOST_STUDENT_PROJECT') || PROJECT_PLACEHOLDER;
+
+    const { room, teacherInvite, teacherBridgeToken, studentBridgeToken } =
+      await createRoomWithParticipants(baseUrl, sessionToken, {
+        roomName,
+        teacherName,
+        studentAgentName,
+        teacherAgentName,
+      });
+
+    if (rl) rl.close();
+
+    // --- 6. emit artifacts to stdout ------------------------------------
+    const studentServerUrl = `http://127.0.0.1:${serverPort}`;
+    const bridgeToml = studentBridgeToml({
+      humanName: studentName,
+      agentName: studentAgentName,
+      serverUrl: studentServerUrl,
+      roomId: room.id,
+      tokenEnv,
+      projectRoot: studentProject,
+      roomUrlHint: servedPublicly ? roomUrl : null,
+    });
+
+    out('');
+    out('########################################################################');
+    out('# clausroom is UP');
+    out('########################################################################');
+    out('');
+    out(`Room URL: ${roomUrl}`);
+    out('');
+    out(
+      teacherOnboarding({
+        teacherName,
+        studentName,
+        projectName,
+        roomUrl,
+        inviteToken: teacherInvite,
+        bridgeToken: teacherBridgeToken,
+        roomId: room.id,
+        repoUrl,
+        tokenEnv,
+        configPath,
+      }),
+    );
+    out('');
+    out('########################################################################');
+    out('# STUDENT (you) — your own bridge.toml, token, and attach line');
+    out('########################################################################');
+    out('');
+    out(`# 1. Save this as ${configPath} (edit [filesystem] roots to your project):`);
+    out('# ----- begin bridge.toml -----');
+    out(bridgeToml);
+    out('# ----- end bridge.toml -----');
+    out('');
+    out('# 2. Export your bridge token (shown ONCE — keep it safe):');
+    out(`export ${tokenEnv}="${studentBridgeToken}"`);
+    out('');
+    out('# 3. Register the bridge with Claude Code:');
+    out(mcpAddLine(tokenEnv, configPath));
+    out('');
+    out('########################################################################');
+    out('# ONE REMAINING MANUAL STEP — share the host with the teacher');
+    out('#   (Tailscale has NO CLI for device sharing; do this in the admin console)');
+    out('########################################################################');
+    out('');
+    out(`#  1. Open the Tailscale admin console:  ${TAILSCALE_ADMIN_URL}`);
+    out('#  2. Find the clausroom host machine, open its "..." menu -> Share...,');
+    out('#     then Copy share link and send that link to the teacher.');
+    out('#  3. Open the ACL editor (Access Controls) and paste');
+    out('#     deploy/tailscale-policy.hujson so the guest reaches ONLY tcp:443');
+    out('#     on this one machine.');
+    out('');
+
+    // --- reminders (stderr) ---------------------------------------------
+    info('');
+    info('[host-setup] REMINDER: every token above is shown exactly ONCE — the server');
+    info('[host-setup] stores only SHA-256 hashes. Copy them now.');
+    if (!servedPublicly && !noServe) {
+      info('[host-setup] NOTE: tailscale serve did not run, so the URL above is loopback-only.');
+      info(`[host-setup]       Expose it later with:  ${manualServeLine}`);
+    }
+
+    // --- 7. open the browser (best-effort; failures are silent) ----------
+    if (!noOpen) {
+      const opened = await openBrowser(roomUrl);
+      if (opened) info(`[host-setup] opened ${roomUrl} in your browser.`);
+    }
+
+    // --- 8. readiness sentinel, then stay up in the foreground ----------
+    out(`CLAUSROOM_UP_READY ${roomUrl}`);
+    info('[host-setup] room is live. Leave this running; press Ctrl-C to stop the server.');
+
+    await new Promise((resolve) => {
+      if (!serverProc || serverProc.exitCode !== null || serverProc.signalCode !== null) {
+        resolve();
+        return;
+      }
+      serverProc.once('exit', (code) => {
+        info(`[host-setup] server exited (code ${code}); shutting down.`);
+        process.exitCode = code && code !== 0 ? 1 : 0;
+        resolve();
+      });
+    });
+  } finally {
+    if (rl) rl.close();
+  }
+}
+
+async function runWizard(flags) {
+  const assumeYes = Boolean(flags.yes);
+  const interactive = Boolean(process.stdin.isTTY) && !flags['non-interactive'] && !assumeYes;
+  const rl = interactive
+    ? rlPromises.createInterface({ input: process.stdin, output: process.stderr })
+    : null;
+
+  const { flagOrEnv, ask } = makeHelpers(flags, interactive, rl);
+
   const tokenEnv = flagOrEnv('token-env') || 'AGENT_ROOM_BRIDGE_TOKEN';
   const configPath = flagOrEnv('config-path', 'CLAUSROOM_HOST_CONFIG_PATH') || DEFAULT_CONFIG_PATH;
 
@@ -546,11 +1060,8 @@ async function main() {
     if (start) {
       registerCleanup();
       const started = await startServer();
-      const hostEnv = process.env.AGENT_ROOM_HOST;
-      const connectHost =
-        !hostEnv || hostEnv === '0.0.0.0' || hostEnv === '::' || hostEnv === '[::]' ? '127.0.0.1' : hostEnv;
       serverPort = started.port;
-      baseUrl = `http://${connectHost}:${serverPort}`;
+      baseUrl = loopbackBaseUrl(serverPort);
       if (!invite && !sessionTokenFlag) invite = started.invite || started.recovery;
       if (!invite && !sessionTokenFlag) {
         fail(
@@ -641,62 +1152,13 @@ async function main() {
     const studentProject =
       flagOrEnv('student-project', 'CLAUSROOM_HOST_STUDENT_PROJECT') || PROJECT_PLACEHOLDER;
 
-    info(`[host-setup] creating room "${roomName}"...`);
-    const roomRes = expectStatus(
-      await request('POST', `${baseUrl}/api/rooms`, { token: sessionToken, json: { name: roomName } }),
-      201,
-      'create room',
-    );
-    const room = roomRes.data.room;
-    info(`[host-setup] room created: ${room.id}`);
-
-    info('[host-setup] adding the teacher (human)...');
-    const teacherRes = expectStatus(
-      await request('POST', `${baseUrl}/api/rooms/${room.id}/participants`, {
-        token: sessionToken,
-        json: { display_name: teacherName, kind: 'human', role: 'human' },
-      }),
-      201,
-      'add teacher',
-    );
-    const teacherInvite = teacherRes.data.invite_token;
-    const teacherUserId = teacherRes.data.participant.user_id;
-    if (!teacherInvite || !teacherInvite.startsWith('arit_')) {
-      fail(`teacher invite token missing/malformed: ${JSON.stringify(teacherRes.data).slice(0, 200)}`);
-    }
-
-    info("[host-setup] adding the student's agent (owned by you)...");
-    const studentAgentRes = expectStatus(
-      await request('POST', `${baseUrl}/api/rooms/${room.id}/participants`, {
-        token: sessionToken,
-        json: { display_name: studentAgentName, kind: 'agent', role: 'agent' },
-      }),
-      201,
-      'add student agent',
-    );
-    const studentBridgeToken = studentAgentRes.data.bridge_token;
-    if (!studentBridgeToken || !studentBridgeToken.startsWith('arbt_')) {
-      fail(`student bridge token missing/malformed: ${JSON.stringify(studentAgentRes.data).slice(0, 200)}`);
-    }
-
-    info("[host-setup] adding the teacher's agent (owned by the teacher)...");
-    const teacherAgentRes = expectStatus(
-      await request('POST', `${baseUrl}/api/rooms/${room.id}/participants`, {
-        token: sessionToken,
-        json: {
-          display_name: teacherAgentName,
-          kind: 'agent',
-          role: 'agent',
-          owner_user_id: teacherUserId,
-        },
-      }),
-      201,
-      'add teacher agent',
-    );
-    const teacherBridgeToken = teacherAgentRes.data.bridge_token;
-    if (!teacherBridgeToken || !teacherBridgeToken.startsWith('arbt_')) {
-      fail(`teacher bridge token missing/malformed: ${JSON.stringify(teacherAgentRes.data).slice(0, 200)}`);
-    }
+    const { room, teacherInvite, teacherBridgeToken, studentBridgeToken } =
+      await createRoomWithParticipants(baseUrl, sessionToken, {
+        roomName,
+        teacherName,
+        studentAgentName,
+        teacherAgentName,
+      });
 
     // --- 4. emit artifacts to stdout -------------------------------------
     const studentServerUrl = `http://127.0.0.1:${serverPort}`;
@@ -814,6 +1276,24 @@ async function maybeWriteStudentConfig(content, rawPath, { interactive, assumeYe
   await fsp.mkdir(path.dirname(target), { recursive: true });
   await fsp.writeFile(target, content, { mode: 0o600 });
   info(`[host-setup] wrote ${target} (contains NO token — export ${tokenEnv} yourself).`);
+}
+
+async function main() {
+  const { flags, positional } = parseArgs(process.argv.slice(2));
+  const mode = positional[0];
+
+  if (flags.help || flags.h) {
+    process.stdout.write(mode === 'up' ? UP_HELP : HELP);
+    return;
+  }
+
+  if (mode === 'up') {
+    await runUp(flags);
+    return;
+  }
+
+  // No subcommand (or a legacy stray positional) -> the guided wizard.
+  await runWizard(flags);
 }
 
 main().catch((err) => {

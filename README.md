@@ -134,15 +134,57 @@ clausroom has two sides with different prerequisites — check yours first.
 Prerequisites are in [Before you start](#before-you-start) (Node 20 + git,
 tailnet admin, a machine that stays up).
 
-### Fast path — `npm run host`
+### Fast path — `npm run up`
 
-The host wizard automates the manual steps below. Build first, then start the
-server in one terminal and point the wizard at it from another:
+One command does the whole launch. Clone, install, build, and run it:
 
 ```bash
 git clone https://github.com/chengine/clausroom clausroom && cd clausroom
 npm install
 npm run build
+npm run up
+```
+
+`npm run up`:
+
+- **starts the server** from source (`node apps/server/dist/index.js`), on the
+  first run exchanging its one-time bootstrap invite for a host session it caches
+  at `~/.clausroom/host-session.json` (mode 0600) and reuses next time;
+- **runs `tailscale serve --bg --https=443 localhost:<port>` for you** and derives
+  the room URL from your machine's Tailscale name (`https://<host>.<tailnet>.ts.net/`).
+  If Tailscale is missing or not logged in it degrades gracefully — you get a
+  loopback URL and the exact `tailscale serve` line to run yourself, and the
+  command keeps going;
+- **creates the room** and its three participants (you, your agent, and the
+  teacher + the teacher's agent), minting each token once;
+- **prints the copy-paste artifacts**: the room URL, a ready-to-send teacher
+  onboarding message (URL + invite token + the teacher's bridge token + room id),
+  and your own `bridge.toml` + `export AGENT_ROOM_BRIDGE_TOKEN=…` + `claude mcp add`
+  attach line;
+- **opens the room in your browser**, then **stays running** and streams the
+  server log. Press Ctrl-C to stop the server (re-run `npm run up` to resume; the
+  persistent `tailscale serve --bg` config is left in place).
+
+That leaves exactly **one manual step**, which the command prints prominently:
+open the [Tailscale admin console](https://login.tailscale.com/admin/machines),
+**Share** the clausroom-host machine with the teacher (Copy share link → send it),
+and paste `deploy/tailscale-policy.hujson` into the ACL editor so the guest can
+reach only `tcp:443`. Send the teacher the onboarding message and you're done.
+
+Useful flags: `--no-serve` (skip Tailscale, use a loopback URL), `--no-open`
+(don't launch a browser), `--non-interactive` plus `--room-name` / `--teacher-name`
+(no prompts), and `--invite arit_…` (when a cached session has expired). Server
+settings come from the same `AGENT_ROOM_*` env vars as `npm start` (e.g.
+`AGENT_ROOM_PORT`, `AGENT_ROOM_DB`). Full list: `node scripts/host-setup.mjs up --help`.
+
+<details>
+<summary><strong>Alternative — <code>npm start</code> + <code>npm run host</code> (manual, multi-step)</strong></summary>
+
+If you'd rather run a persistent server yourself and drive the wizard against it,
+build first, then start the server in one terminal and point the wizard at it
+from another:
+
+```bash
 npm start   # leave this running in one terminal
 ```
 
@@ -156,18 +198,19 @@ npm run host -- --invite arit_<bootstrap token>
 
 The wizard logs in with that invite, walks you through creating the room and its
 participant tokens, prints the exact `tailscale serve --https=443 localhost:3000`
-line to expose the server, and emits a ready-to-send onboarding message with the
-room URL, room id, and each token already filled in — so you never hand-copy a
-token. Send that message to the teacher and you're done.
+line to expose the server (the wizard never runs Tailscale itself), and emits a
+ready-to-send onboarding message with the room URL, room id, and each token
+already filled in. Unlike `npm run up`, you run `tailscale serve` and share the
+machine yourself.
 
-> **One-shot alternative:** `npm run host -- --start` (after `npm run build`)
-> launches its own throwaway server, auto-detects the bootstrap invite, does all
-> of the above, then stops that server again — handy for a dry run. For a room
-> you'll actually keep using, run a persistent server with `npm start` and use
-> `--invite` as shown. Both modes are fully scriptable; see
+> **One-shot variant:** `npm run host -- --start` launches its own throwaway
+> server, auto-detects the bootstrap invite, does all of the above, then stops
+> that server again — handy for a dry run. Both modes are fully scriptable; see
 > `node scripts/host-setup.mjs --help`.
 
-Prefer to run each step yourself (or want to understand them)? The explicit
+</details>
+
+Prefer to run each step yourself (or want to understand them)? The fully explicit
 version follows.
 
 ### 1. Build and start the server
@@ -264,7 +307,8 @@ Code and Codex details (and a `npx clausroom-bridge check` self-test).
 ## Onboarding — GUEST (teacher) side
 
 Send the teacher `examples/onboarding-message.md` (fill in the placeholders — or
-let `npm run host` print a copy with everything already filled in). The teacher
+let `npm run up` / `npm run host` print a copy with everything already filled in).
+The teacher
 needs **no clone and no build**: just Tailscale, a browser, and Node 20 for
 `npx`. Their steps:
 
@@ -421,6 +465,7 @@ scripts/
   smoke-test.mjs                       # `npm run smoke`
 ```
 
-Root scripts: `npm run host` (guided host-setup wizard), `npm run build` (all
-workspaces), `npm start` (server), `npm run dev:server`, `npm run dev:web`,
-`npm run smoke`.
+Root scripts: `npm run up` (one-command host launch: server + Tailscale Serve +
+room + onboarding, then stays up), `npm run host` (guided host-setup wizard),
+`npm run build` (all workspaces), `npm start` (server), `npm run dev:server`,
+`npm run dev:web`, `npm run smoke`.
