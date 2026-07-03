@@ -1,26 +1,29 @@
 /* ==========================================================================
-   clausroom design system — hand-rolled, dark, glassy, violet->sky accent.
-   8px spacing grid, rounded-xl cards, subtle 8% white borders.
+   clausroom design system — warm amber terminal: dark brown-charcoal base,
+   glassy warm-cream cards, amber->ember accent. 8px spacing grid, rounded-xl
+   cards, subtle warm 9% borders.
    ========================================================================== */
 
 :root {
-  --bg: #0b0f1a;
-  --bg-glow-a: rgba(139, 92, 246, 0.13);
-  --bg-glow-b: rgba(56, 189, 248, 0.1);
-  --surface: rgba(255, 255, 255, 0.045);
-  --surface-strong: rgba(255, 255, 255, 0.08);
-  --border: rgba(255, 255, 255, 0.08);
-  --border-strong: rgba(255, 255, 255, 0.16);
-  --text: #e7ebf4;
-  --text-dim: #9aa3b8;
-  --text-faint: #6b7488;
-  --violet: #a78bfa;
+  --bg: #16130e;
+  --bg-glow-a: rgba(245, 158, 11, 0.1);
+  --bg-glow-b: rgba(249, 115, 22, 0.07);
+  --surface: rgba(255, 240, 220, 0.04);
+  --surface-strong: rgba(255, 240, 220, 0.08);
+  --border: rgba(255, 240, 220, 0.09);
+  --border-strong: rgba(255, 240, 220, 0.18);
+  --text: #f5efe6;
+  --text-dim: #b8ad9c;
+  --text-faint: #857a68;
+  --accent: #f59e0b;
+  --ember: #f97316;
   --sky: #38bdf8;
   --emerald: #34d399;
   --amber: #fbbf24;
   --red: #f87171;
-  --gradient: linear-gradient(120deg, #8b5cf6 0%, #38bdf8 100%);
-  --ring: 0 0 0 2px rgba(56, 189, 248, 0.65);
+  --gradient: linear-gradient(120deg, #f59e0b 0%, #f97316 100%);
+  --on-accent: #2a1a05;
+  --ring: 0 0 0 2px rgba(245, 158, 11, 0.65);
   --radius-xl: 16px;
   --radius-lg: 12px;
   --radius-md: 10px;
@@ -57,13 +60,13 @@ body {
   background-image:
     radial-gradient(1000px 600px at 12% -10%, var(--bg-glow-a), transparent 60%),
     radial-gradient(900px 560px at 105% 8%, var(--bg-glow-b), transparent 55%),
-    radial-gradient(700px 700px at 50% 120%, rgba(139, 92, 246, 0.07), transparent 60%);
+    radial-gradient(700px 700px at 50% 120%, rgba(245, 158, 11, 0.06), transparent 60%);
   background-attachment: fixed;
   -webkit-font-smoothing: antialiased;
 }
 
 ::selection {
-  background: rgba(56, 189, 248, 0.3);
+  background: rgba(245, 158, 11, 0.32);
 }
 
 :focus-visible {
@@ -117,7 +120,7 @@ time,
 }
 
 .btn:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.12);
+  background: rgba(255, 240, 220, 0.12);
 }
 
 .btn:active:not(:disabled) {
@@ -131,7 +134,7 @@ time,
 
 .btn--primary {
   background: var(--gradient);
-  color: #0a0d16;
+  color: var(--on-accent);
   border: none;
 }
 
@@ -149,7 +152,7 @@ time,
 .btn--ghost:hover:not(:disabled) {
   color: var(--text);
   border-color: var(--border-strong);
-  background: rgba(255, 255, 255, 0.05);
+  background: rgba(255, 240, 220, 0.05);
 }
 
 .btn--sm {
@@ -204,7 +207,7 @@ time,
   background: none;
   border: none;
   padding: 0;
-  color: var(--sky);
+  color: var(--accent);
   font: inherit;
   font-size: 13px;
   cursor: pointer;
@@ -233,8 +236,8 @@ time,
 
 .input:focus {
   outline: none;
-  border-color: rgba(56, 189, 248, 0.6);
-  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.18);
+  border-color: rgba(245, 158, 11, 0.6);
+  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.18);
 }
 
 .input--mono {
@@ -292,9 +295,9 @@ select.input {
 .notice-banner {
   padding: var(--s1) 12px;
   border-radius: var(--radius-md);
-  background: rgba(56, 189, 248, 0.1);
-  border: 1px solid rgba(56, 189, 248, 0.4);
-  color: var(--sky);
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  color: var(--amber);
   font-size: 13px;
 }
 
@@ -331,7 +334,7 @@ select.input {
 }
 
 .pill--expired {
-  background: rgba(255, 255, 255, 0.05);
+  background: rgba(255, 240, 220, 0.05);
   color: var(--text-faint);
 }
 
@@ -340,7 +343,7 @@ select.input {
   height: 26px;
   border-radius: 50%;
   border: 3px solid var(--border-strong);
-  border-top-color: var(--sky);
+  border-top-color: var(--accent);
   animation: spin 800ms linear infinite;
 }
 
@@ -360,7 +363,7 @@ select.input {
   padding: 0 5px;
   border-radius: var(--radius-pill);
   background: var(--gradient);
-  color: #0a0d16;
+  color: var(--on-accent);
   font-size: 11px;
   font-weight: 800;
 }
@@ -502,7 +505,7 @@ select.input {
   font-weight: 800;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: var(--violet);
+  color: var(--accent);
 }
 
 .home-main {
@@ -551,9 +554,9 @@ select.input {
 }
 
 .room-tile:hover {
-  border-color: rgba(56, 189, 248, 0.45);
+  border-color: rgba(245, 158, 11, 0.45);
   transform: translateY(-1px);
-  background: rgba(255, 255, 255, 0.06);
+  background: rgba(255, 240, 220, 0.06);
 }
 
 .room-tile__name {
@@ -583,8 +586,8 @@ select.input {
 }
 
 .role-badge--owner {
-  border-color: rgba(167, 139, 250, 0.5);
-  color: var(--violet);
+  border-color: rgba(245, 158, 11, 0.5);
+  color: var(--accent);
 }
 
 .role-badge--observer {
@@ -804,7 +807,7 @@ select.input {
   gap: 10px;
   padding: var(--s1) 6px var(--s2) 2px;
   scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.16) transparent;
+  scrollbar-color: rgba(245, 158, 11, 0.3) transparent;
 }
 
 .timeline__approval {
@@ -825,12 +828,12 @@ select.input {
   border: none;
   border-radius: var(--radius-pill);
   background: var(--gradient);
-  color: #0a0d16;
+  color: var(--on-accent);
   font: inherit;
   font-size: 12.5px;
   font-weight: 800;
   cursor: pointer;
-  box-shadow: 0 8px 24px rgba(56, 189, 248, 0.35);
+  box-shadow: 0 8px 24px rgba(249, 115, 22, 0.35);
   animation: rise 200ms ease both;
   z-index: 5;
 }
@@ -872,7 +875,7 @@ select.input {
 }
 
 .msg-card {
-  --pc: #8b93a7;
+  --pc: #a39684;
   display: flex;
   gap: 10px;
   padding: 12px 14px 12px 12px;
@@ -884,6 +887,88 @@ select.input {
   -webkit-backdrop-filter: blur(14px);
   animation: rise 260ms ease both;
   max-width: 100%;
+}
+
+/* Two-sided dialogue: the viewer's camp (them + agents they own) aligns
+   right with mirrored chrome; the other camp aligns left. One chronological
+   column — only alignment flips. system events and approvals stay centered. */
+
+.msg-card--theirs {
+  align-self: flex-start;
+  max-width: 72%;
+}
+
+.msg-card--mine {
+  align-self: flex-end;
+  max-width: 72%;
+  flex-direction: row-reverse;
+  padding: 12px 12px 12px 14px;
+  border-left: 1px solid var(--border);
+  border-right: 3px solid var(--pc);
+}
+
+.msg-card--mine .msg-card__head {
+  flex-direction: row-reverse;
+}
+
+.msg-card--mine .msg-card__time {
+  margin-left: 0;
+  margin-right: auto;
+}
+
+.msg-card--mine .msg-card__recipients {
+  text-align: right;
+}
+
+.msg-card--mine .msg-card__reply {
+  border-left: none;
+  border-right: 2px solid var(--border-strong);
+}
+
+.msg-card--mine .choice-row,
+.msg-card--mine .msg-card__artifacts {
+  justify-content: flex-end;
+}
+
+/* Narrow screens: back to a single left-aligned column; "mine" keeps a
+   subtle sender-tinted wash so you/them still read at a glance. */
+@media (max-width: 720px) {
+  .msg-card--mine,
+  .msg-card--theirs {
+    align-self: stretch;
+    max-width: 100%;
+  }
+
+  .msg-card--mine {
+    flex-direction: row;
+    padding: 12px 14px 12px 12px;
+    border-right: 1px solid var(--border);
+    border-left: 3px solid var(--pc);
+    background: color-mix(in srgb, var(--pc) 7%, transparent);
+  }
+
+  .msg-card--mine .msg-card__head {
+    flex-direction: row;
+  }
+
+  .msg-card--mine .msg-card__time {
+    margin-left: auto;
+    margin-right: 0;
+  }
+
+  .msg-card--mine .msg-card__recipients {
+    text-align: left;
+  }
+
+  .msg-card--mine .msg-card__reply {
+    border-right: none;
+    border-left: 2px solid var(--border-strong);
+  }
+
+  .msg-card--mine .choice-row,
+  .msg-card--mine .msg-card__artifacts {
+    justify-content: flex-start;
+  }
 }
 
 .msg-card__avatar {
@@ -950,7 +1035,7 @@ select.input {
   padding: 4px 10px;
   border-left: 2px solid var(--border-strong);
   border-radius: 4px;
-  background: rgba(255, 255, 255, 0.03);
+  background: rgba(255, 240, 220, 0.03);
   color: var(--text-faint);
   font-size: 12px;
   overflow: hidden;
@@ -976,7 +1061,7 @@ select.input {
 .type-badge {
   padding: 2px 8px;
   border-radius: var(--radius-pill);
-  background: rgba(255, 255, 255, 0.06);
+  background: rgba(255, 240, 220, 0.06);
   border: 1px solid var(--border);
   color: var(--text-dim);
   font-size: 10.5px;
@@ -991,8 +1076,8 @@ select.input {
 }
 
 .type-badge--agent_answer {
-  color: var(--violet);
-  border-color: rgba(167, 139, 250, 0.35);
+  color: #fb923c;
+  border-color: rgba(251, 146, 60, 0.35);
 }
 
 .type-badge--evidence {
@@ -1060,7 +1145,7 @@ select.input {
   padding: 6px 14px;
   border-radius: var(--radius-pill);
   border: 1px solid var(--border-strong);
-  background: rgba(255, 255, 255, 0.04);
+  background: rgba(255, 240, 220, 0.04);
   color: var(--text);
   font: inherit;
   font-size: 12.5px;
@@ -1078,7 +1163,7 @@ select.input {
 .choice-pill:hover:not(:disabled) {
   background: var(--gradient);
   border-color: transparent;
-  color: #0a0d16;
+  color: var(--on-accent);
   transform: translateY(-1px);
 }
 
@@ -1095,7 +1180,7 @@ select.input {
 .choice-pill--chosen:disabled {
   background: var(--gradient);
   border-color: transparent;
-  color: #0a0d16;
+  color: var(--on-accent);
   font-weight: 800;
   opacity: 1;
 }
@@ -1111,7 +1196,7 @@ select.input {
   width: 11px;
   height: 11px;
   border-radius: 50%;
-  border: 2px solid rgba(255, 255, 255, 0.25);
+  border: 2px solid rgba(255, 240, 220, 0.25);
   border-top-color: currentColor;
   animation: spin 800ms linear infinite;
 }
@@ -1139,8 +1224,8 @@ select.input {
 }
 
 .artifact-chip:hover {
-  border-color: rgba(56, 189, 248, 0.55);
-  background: rgba(56, 189, 248, 0.08);
+  border-color: rgba(245, 158, 11, 0.55);
+  background: rgba(245, 158, 11, 0.08);
 }
 
 .artifact-chip--loading {
@@ -1163,7 +1248,7 @@ select.input {
 
 .artifact-chip--dead .artifact-chip__name {
   text-decoration: line-through;
-  text-decoration-color: rgba(255, 255, 255, 0.35);
+  text-decoration-color: rgba(255, 240, 220, 0.35);
 }
 
 .artifact-chip__name {
@@ -1182,7 +1267,7 @@ select.input {
 }
 
 .artifact-chip__dl {
-  color: var(--sky);
+  color: var(--accent);
 }
 
 /* system events */
@@ -1202,7 +1287,7 @@ select.input {
 
 .system-row__icon {
   display: inline-flex;
-  color: var(--violet);
+  color: var(--accent);
   opacity: 0.75;
 }
 
@@ -1267,13 +1352,13 @@ select.input {
 }
 
 .md a {
-  color: var(--sky);
+  color: var(--accent);
   text-decoration: none;
-  border-bottom: 1px solid rgba(56, 189, 248, 0.35);
+  border-bottom: 1px solid rgba(245, 158, 11, 0.4);
 }
 
 .md a:hover {
-  border-bottom-color: var(--sky);
+  border-bottom-color: var(--accent);
 }
 
 .md code {
@@ -1305,7 +1390,7 @@ select.input {
 .md blockquote {
   margin: var(--s1) 0;
   padding: 2px 14px;
-  border-left: 3px solid rgba(167, 139, 250, 0.5);
+  border-left: 3px solid rgba(245, 158, 11, 0.5);
   color: var(--text-dim);
 }
 
@@ -1326,7 +1411,7 @@ select.input {
 }
 
 .md th {
-  background: rgba(255, 255, 255, 0.05);
+  background: rgba(255, 240, 220, 0.05);
 }
 
 .md hr {
@@ -1365,7 +1450,7 @@ select.input {
 }
 
 .approval-card--expired {
-  background: rgba(255, 255, 255, 0.02);
+  background: rgba(255, 240, 220, 0.02);
   border-color: var(--border);
   opacity: 0.75;
 }
@@ -1487,7 +1572,7 @@ select.input {
 }
 
 .recipient-chip {
-  --pc: var(--sky);
+  --pc: var(--accent);
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -1535,8 +1620,8 @@ select.input {
 
 .composer__input:focus {
   outline: none;
-  border-color: rgba(56, 189, 248, 0.6);
-  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.16);
+  border-color: rgba(245, 158, 11, 0.6);
+  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.16);
 }
 
 .composer__input:disabled {
@@ -1583,7 +1668,7 @@ select.input {
   gap: var(--s1);
   overflow-y: auto;
   scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.16) transparent;
+  scrollbar-color: rgba(245, 158, 11, 0.3) transparent;
 }
 
 .sidebar__section {
@@ -1627,7 +1712,7 @@ select.input {
 }
 
 .participant {
-  --pc: #8b93a7;
+  --pc: #a39684;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -1666,10 +1751,10 @@ select.input {
   box-shadow: 0 0 6px rgba(52, 211, 153, 0.9);
 }
 
-/* Agent activity: pulsing violet while the agent reports 'working'. */
+/* Agent activity: pulsing amber while the agent reports 'working'. */
 .presence-dot--working {
-  background: var(--violet);
-  box-shadow: 0 0 6px rgba(167, 139, 250, 0.9);
+  background: var(--accent);
+  box-shadow: 0 0 6px rgba(245, 158, 11, 0.9);
   animation: pulse 1.2s ease-in-out infinite;
 }
 
@@ -1679,9 +1764,9 @@ select.input {
   gap: 5px;
   padding: 1px 8px;
   border-radius: var(--radius-pill);
-  background: rgba(167, 139, 250, 0.12);
-  border: 1px solid rgba(167, 139, 250, 0.45);
-  color: var(--violet);
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.45);
+  color: var(--accent);
   font-size: 10.5px;
   font-weight: 700;
   letter-spacing: 0.03em;
@@ -1692,7 +1777,7 @@ select.input {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--violet);
+  background: var(--accent);
   animation: pulse 1.2s ease-in-out infinite;
 }
 
@@ -1721,8 +1806,8 @@ select.input {
   letter-spacing: 0.06em;
   padding: 1px 6px;
   border-radius: var(--radius-pill);
-  background: rgba(56, 189, 248, 0.14);
-  color: var(--sky);
+  background: rgba(245, 158, 11, 0.16);
+  color: var(--accent);
 }
 
 .participant__meta {
@@ -1789,7 +1874,7 @@ select.input {
   flex: 1;
   height: 8px;
   border-radius: var(--radius-pill);
-  background: rgba(255, 255, 255, 0.07);
+  background: rgba(255, 240, 220, 0.07);
   border: 1px solid var(--border);
   transition: background 240ms ease;
 }
@@ -1815,10 +1900,10 @@ select.input {
   justify-content: center;
   width: 100%;
   background: var(--gradient);
-  color: #0a0d16;
+  color: var(--on-accent);
   border: none;
   font-weight: 800;
-  box-shadow: 0 6px 18px rgba(56, 189, 248, 0.3);
+  box-shadow: 0 6px 18px rgba(249, 115, 22, 0.35);
 }
 
 .continue-btn:hover:not(:disabled) {
@@ -1917,7 +2002,7 @@ select.input {
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(4, 6, 12, 0.6);
+  background: rgba(12, 9, 5, 0.6);
   backdrop-filter: blur(3px);
   -webkit-backdrop-filter: blur(3px);
   z-index: 30;
@@ -1944,7 +2029,7 @@ select.input {
   display: flex;
   flex-direction: column;
   gap: var(--s3);
-  background: rgba(14, 18, 30, 0.92);
+  background: rgba(30, 25, 17, 0.92);
   animation: slide-in 240ms ease both;
 }
 
@@ -2017,8 +2102,8 @@ select.input {
 }
 
 .segmented__btn--on {
-  background: rgba(56, 189, 248, 0.14);
-  color: var(--sky);
+  background: rgba(245, 158, 11, 0.16);
+  color: var(--accent);
 }
 
 .rotate-list {
@@ -2057,7 +2142,7 @@ select.input {
   display: flex;
   flex-direction: column;
   gap: var(--s2);
-  background: rgba(14, 18, 30, 0.96);
+  background: rgba(30, 25, 17, 0.96);
   animation: rise 240ms ease both;
 }
 
@@ -2101,7 +2186,7 @@ select.input {
   padding: 10px 12px;
   border-radius: var(--radius-md);
   background: rgba(0, 0, 0, 0.4);
-  border: 1px solid rgba(56, 189, 248, 0.35);
+  border: 1px solid rgba(245, 158, 11, 0.4);
 }
 
 .token-box__value {
@@ -2109,7 +2194,7 @@ select.input {
   font-family: var(--mono);
   font-size: 13px;
   word-break: break-all;
-  color: var(--sky);
+  color: var(--amber);
 }
 
 .snippet {
