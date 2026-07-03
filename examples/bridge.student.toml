@@ -2,6 +2,11 @@
 # Copy to ~/.clausroom/bridge.toml (or pass --config) and edit the placeholders.
 # The bridge token itself is NEVER stored here: export it in the environment
 # variable named by `token_env` below (default AGENT_ROOM_BRIDGE_TOKEN).
+#
+# FASTER: when you added your agent, the room's participant setup drawer generated
+# this file for you with server_url, room_id, and the token line already filled in
+# — copy that and just set [filesystem] roots. This hand-edited template is the
+# file-first fallback.
 
 [identity]
 human_name  = "Student"            # your name as shown in the room

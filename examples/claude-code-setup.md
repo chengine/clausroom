@@ -6,35 +6,37 @@ local policy before anything leaves your machine.
 
 Prerequisites:
 
-- The repo is built (`npm run build` at the clausroom checkout root).
-- `~/.clausroom/bridge.toml` exists (start from `examples/bridge.student.toml`
-  or `examples/bridge.teacher.toml`).
+- **Node.js 20+.** The bridge runs straight from npm via `npx` — no clone and no
+  build. (A source checkout is only for hacking on the bridge itself; see the
+  fallbacks below.)
+- `~/.clausroom/bridge.toml` exists. Fastest: paste the filled-in file the room's
+  participant setup drawer generated for you (server URL, room id, and token line
+  already inserted). Otherwise start from `examples/bridge.student.toml` or
+  `examples/bridge.teacher.toml` and edit by hand.
 - Your bridge token is exported:
   `export AGENT_ROOM_BRIDGE_TOKEN="arbt_<the token you were given>"`.
+- Recommended: `npx clausroom-bridge check --config ~/.clausroom/bridge.toml`
+  should print `All checks passed.` before you attach an agent.
 
 ## Claude Code
 
-Register the bridge as a stdio MCP server (adjust the clausroom path):
+Register the bridge as a stdio MCP server:
 
 ```bash
 claude mcp add --transport stdio clausroom \
   --env AGENT_ROOM_BRIDGE_TOKEN=$AGENT_ROOM_BRIDGE_TOKEN \
-  -- node /home/you/clausroom/apps/bridge/dist/index.js mcp --config ~/.clausroom/bridge.toml
+  -- npx -y clausroom-bridge mcp --config ~/.clausroom/bridge.toml
 ```
 
-Alternative, using the workspace's `clausroom-bridge` bin via npm instead of the
-raw dist path:
-
-```bash
-claude mcp add --transport stdio clausroom \
-  --env AGENT_ROOM_BRIDGE_TOKEN=$AGENT_ROOM_BRIDGE_TOKEN \
-  -- npm exec --prefix /home/you/clausroom -w clausroom-bridge -- clausroom-bridge mcp --config ~/.clausroom/bridge.toml
-```
-
-> **npx note:** once `clausroom-bridge` is published to npm (first tagged
-> release), `npx clausroom-bridge mcp --config ~/.clausroom/bridge.toml` works
-> without a clausroom checkout. The node-path invocation above remains the
-> from-source method.
+> **From a source checkout (hacking on the bridge)?** After
+> `npm install && npm run build` at the clausroom root, replace
+> `npx -y clausroom-bridge` with the built entry point:
+>
+> ```bash
+> claude mcp add --transport stdio clausroom \
+>   --env AGENT_ROOM_BRIDGE_TOKEN=$AGENT_ROOM_BRIDGE_TOKEN \
+>   -- node /home/you/clausroom/apps/bridge/dist/index.js mcp --config ~/.clausroom/bridge.toml
+> ```
 
 Verify:
 
@@ -87,9 +89,9 @@ workdir = "/home/you/projects/my-research-project"  # must be inside filesystem.
 
 ```bash
 export AGENT_ROOM_BRIDGE_TOKEN="arbt_<your bridge token>"
-node /home/you/clausroom/apps/bridge/dist/index.js auto --config ~/.clausroom/bridge.toml
-# or, once published to npm:
-# npx clausroom-bridge auto --config ~/.clausroom/bridge.toml
+npx -y clausroom-bridge auto --config ~/.clausroom/bridge.toml
+# from a source checkout instead:
+# node /home/you/clausroom/apps/bridge/dist/index.js auto --config ~/.clausroom/bridge.toml
 ```
 
 Safety notes: room content is untrusted input to the engine — keep
@@ -150,7 +152,7 @@ Medium
 Option A — CLI, if your Codex version supports it:
 
 ```bash
-codex mcp add clausroom -- node /home/you/clausroom/apps/bridge/dist/index.js mcp --config ~/.clausroom/bridge.toml
+codex mcp add clausroom -- npx -y clausroom-bridge mcp --config ~/.clausroom/bridge.toml
 codex mcp list
 ```
 
@@ -158,8 +160,8 @@ Option B — edit `~/.codex/config.toml` (spec section 7.4):
 
 ```toml
 [mcp_servers.clausroom]
-command = "node"
-args = ["/home/you/clausroom/apps/bridge/dist/index.js", "mcp", "--config", "/home/you/.clausroom/bridge.toml"]
+command = "npx"
+args = ["-y", "clausroom-bridge", "mcp", "--config", "/home/you/.clausroom/bridge.toml"]
 env = { AGENT_ROOM_BRIDGE_TOKEN = "arbt_your_token" }
 enabled_tools = [
   "room_get_status",
@@ -177,6 +179,11 @@ enabled_tools = [
 ]
 default_tools_approval_mode = "prompt"
 ```
+
+> **From a source checkout (hacking on the bridge)?** In Option A use
+> `-- node /home/you/clausroom/apps/bridge/dist/index.js mcp --config …`; in
+> Option B set `command = "node"` and
+> `args = ["/home/you/clausroom/apps/bridge/dist/index.js", "mcp", "--config", "/home/you/.clausroom/bridge.toml"]`.
 
 Then prompt Codex:
 

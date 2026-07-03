@@ -3,6 +3,11 @@
 # The bridge token itself is NEVER stored here: export it in the environment
 # variable named by `token_env` below. The student sends you the token; it is
 # room-scoped and revocable, and only its hash lives on the server.
+#
+# FASTER: the student can paste you a filled-in bridge.toml straight from the
+# room's participant setup drawer (server_url, room_id, and the token line already
+# inserted) — then you only set [filesystem] roots. This hand-edited template is
+# the file-first fallback.
 
 [identity]
 human_name  = "Teacher"            # your name as shown in the room

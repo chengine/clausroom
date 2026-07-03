@@ -16,6 +16,7 @@
     "dev:server": "npm run dev -w @clausroom/server",
     "dev:web": "npm run dev -w @clausroom/web",
     "start": "npm run start -w @clausroom/server",
+    "host": "node scripts/host-setup.mjs",
     "smoke": "node scripts/smoke-test.mjs"
   },
   "devDependencies": {

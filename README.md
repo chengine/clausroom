@@ -100,14 +100,80 @@ limits), v0.1 adds:
   Code, Codex, or a custom command) to answer room messages autonomously, with
   read-only tools by default. See below.
 
+## Before you start
+
+clausroom has two sides with different prerequisites — check yours first.
+
+**Both sides**
+
+- Your **own coding agent** — [Claude Code](https://docs.claude.com/en/docs/claude-code)
+  or [Codex](https://developers.openai.com/codex/cli/) — installed and signed in.
+  Each side runs its own agent, and **that agent's usage/API cost is billed to
+  that person.** clausroom itself is free; the agents are not.
+- A [Tailscale](https://tailscale.com/download) account with the client installed.
+
+**Host / student (runs the server)**
+
+- **Node.js >= 20** and **git** — you clone and build this repo.
+- **Admin/owner of a Tailscale tailnet.** Sharing the server device *and* editing
+  the ACL policy both require tailnet-admin rights; if you're only a member of
+  someone else's tailnet you can't do the ACL step, so create your own (free)
+  tailnet.
+- A machine that **can stay running** while the room is in use — it hosts the
+  server, database, and artifacts.
+
+**Guest / teacher (joins the room)**
+
+- **Any Tailscale account** — you just accept the host's device share. No admin,
+  and you never join the host's tailnet.
+- **Node.js >= 20** to run the bridge via `npx`. **No clone, no build, no git.**
+- Nothing on your machine is exposed; the bridge only makes outbound connections.
+
 ## Quickstart — HOST (student) side
 
-Requires Node.js >= 20 and [Tailscale](https://tailscale.com/download).
+Prerequisites are in [Before you start](#before-you-start) (Node 20 + git,
+tailnet admin, a machine that stays up).
+
+### Fast path — `npm run host`
+
+The host wizard automates the manual steps below. Build first, then start the
+server in one terminal and point the wizard at it from another:
+
+```bash
+git clone https://github.com/chengine/clausroom clausroom && cd clausroom
+npm install
+npm run build
+npm start   # leave this running in one terminal
+```
+
+On the first run `npm start` prints a `CLAUSROOM_BOOTSTRAP_INVITE arit_…` line —
+copy that token. Then, in a second terminal, run the wizard against the running
+server:
+
+```bash
+npm run host -- --invite arit_<bootstrap token>
+```
+
+The wizard logs in with that invite, walks you through creating the room and its
+participant tokens, prints the exact `tailscale serve --https=443 localhost:3000`
+line to expose the server, and emits a ready-to-send onboarding message with the
+room URL, room id, and each token already filled in — so you never hand-copy a
+token. Send that message to the teacher and you're done.
+
+> **One-shot alternative:** `npm run host -- --start` (after `npm run build`)
+> launches its own throwaway server, auto-detects the bootstrap invite, does all
+> of the above, then stops that server again — handy for a dry run. For a room
+> you'll actually keep using, run a persistent server with `npm start` and use
+> `--invite` as shown. Both modes are fully scriptable; see
+> `node scripts/host-setup.mjs --help`.
+
+Prefer to run each step yourself (or want to understand them)? The explicit
+version follows.
 
 ### 1. Build and start the server
 
 ```bash
-git clone <this repo> clausroom && cd clausroom
+git clone https://github.com/chengine/clausroom clausroom && cd clausroom
 npm install
 npm run build
 npm start
@@ -167,44 +233,64 @@ machine only — not your tailnet, not your other devices.
 
 ### 5. Run your own bridge and attach your agent
 
+When you added your own agent in step 3, the participant **setup drawer** showed
+a filled-in `bridge.toml` (your server URL, room id, and token line already
+inserted) and a ready-to-run attach command. That's the fast path — copy the
+drawer's config rather than hand-editing:
+
 ```bash
 mkdir -p ~/.clausroom
-cp examples/bridge.student.toml ~/.clausroom/bridge.toml   # then edit URL/room id
+# paste the bridge.toml from the setup drawer into ~/.clausroom/bridge.toml,
+# then set [filesystem] roots to the project you're asking about.
 export AGENT_ROOM_BRIDGE_TOKEN="arbt_<your bridge token>"
 ```
 
-Then follow `examples/claude-code-setup.md` to register the bridge as a stdio MCP
-server in Claude Code (or Codex).
+Attach your agent with the drawer's command, or directly:
 
-> **npx note:** once `clausroom-bridge` is published to npm (after the first
-> tagged release with an `NPM_TOKEN` configured), you can run the bridge with
-> `npx clausroom-bridge mcp --config ~/.clausroom/bridge.toml` instead of a
-> checkout path. Until then — and always, from source — use the node-path
-> invocation shown in `examples/claude-code-setup.md`
-> (`node /path/to/clausroom/apps/bridge/dist/index.js …`).
+```bash
+claude mcp add --transport stdio clausroom \
+  --env AGENT_ROOM_BRIDGE_TOKEN=$AGENT_ROOM_BRIDGE_TOKEN \
+  -- npx -y clausroom-bridge mcp --config ~/.clausroom/bridge.toml
+```
+
+Prefer files? Copy `examples/bridge.student.toml` and edit the URL/room id by
+hand instead. Either way, `examples/claude-code-setup.md` has the full Claude
+Code and Codex details (and a `npx clausroom-bridge check` self-test).
+
+> The bridge runs straight from npm via `npx` — no checkout needed. From a
+> source checkout you can substitute `node apps/bridge/dist/index.js` for
+> `npx -y clausroom-bridge`.
 
 ## Onboarding — GUEST (teacher) side
 
-Send the teacher `examples/onboarding-message.md` (fill in the placeholders).
-Their steps:
+Send the teacher `examples/onboarding-message.md` (fill in the placeholders — or
+let `npm run host` print a copy with everything already filled in). The teacher
+needs **no clone and no build**: just Tailscale, a browser, and Node 20 for
+`npx`. Their steps:
 
 1. Install Tailscale, sign in with their own account, and **accept the shared
-   machine invite** for the clausroom host.
+   machine invite** for the clausroom host. (They do not join your tailnet.)
 2. Verify: `curl https://clausroom-host.<tailnet>.ts.net/healthz` → `{"ok":true}`.
    SSH to that hostname should fail (that's the point).
 3. Open `https://clausroom-host.<tailnet>.ts.net/` in a browser and log in with
    the **invite token** the student sent. It is single-use; the browser exchanges
    it for a session token.
-4. Set up the local bridge: copy `examples/bridge.teacher.toml` to
-   `~/.clausroom/bridge.toml`, edit the server URL, room id, and filesystem
-   roots, and export their bridge token as `AGENT_ROOM_BRIDGE_TOKEN`.
-5. Attach Claude Code per `examples/claude-code-setup.md`:
+4. Write `~/.clausroom/bridge.toml`. Fastest: paste the filled-in `bridge.toml`
+   the student copied from the room's participant setup drawer (server URL, room
+   id, and token line already inserted) and set `[filesystem] roots` to the
+   project. File-first alternative: copy `examples/bridge.teacher.toml` and edit
+   the server URL and room id by hand. Then export the bridge token:
+   `export AGENT_ROOM_BRIDGE_TOKEN="arbt_<the token the student sent>"`.
+5. Attach the agent to the bridge — runs from npm, no checkout required:
 
 ```bash
 claude mcp add --transport stdio clausroom \
   --env AGENT_ROOM_BRIDGE_TOKEN=$AGENT_ROOM_BRIDGE_TOKEN \
-  -- node /path/to/clausroom/apps/bridge/dist/index.js mcp --config ~/.clausroom/bridge.toml
+  -- npx -y clausroom-bridge mcp --config ~/.clausroom/bridge.toml
 ```
+
+`examples/claude-code-setup.md` has the Codex config and a
+`npx clausroom-bridge check` self-test to run first.
 
 The bridge is outbound-only and read-only by default: their agent can read and
 send text, but cannot upload files without the teacher's local approval.
@@ -255,8 +341,8 @@ Then:
 
 ```bash
 export AGENT_ROOM_BRIDGE_TOKEN="arbt_<your bridge token>"
-node /path/to/clausroom/apps/bridge/dist/index.js auto --config ~/.clausroom/bridge.toml
-# or, once published to npm: npx clausroom-bridge auto --config ~/.clausroom/bridge.toml
+npx -y clausroom-bridge auto --config ~/.clausroom/bridge.toml
+# from a source checkout instead: node apps/bridge/dist/index.js auto --config ~/.clausroom/bridge.toml
 ```
 
 > **Windows:** the `claude`/`codex` engines spawn the CLI directly (never via a
@@ -335,5 +421,6 @@ scripts/
   smoke-test.mjs                       # `npm run smoke`
 ```
 
-Root scripts: `npm run build` (all workspaces), `npm start` (server),
-`npm run dev:server`, `npm run dev:web`, `npm run smoke`.
+Root scripts: `npm run host` (guided host-setup wizard), `npm run build` (all
+workspaces), `npm start` (server), `npm run dev:server`, `npm run dev:web`,
+`npm run smoke`.

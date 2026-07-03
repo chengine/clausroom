@@ -23,32 +23,34 @@ The **server and web UI** are not in this package — run them from the
 
 ## Quick start (no install)
 
-Requires Node 20+.
-
-> **Not on npm yet?** Until the first `clausroom-bridge` release is published,
-> `npx clausroom-bridge …` fails with a 404. Run it from a repo checkout
-> instead: `npm install && npm run build` in
-> [the clausroom repo](https://github.com/chengine/clausroom), then substitute
-> `node <repo>/apps/bridge/dist/index.js` wherever a command below says
-> `npx clausroom-bridge`.
+Requires Node 20+. No clone and no build — `npx` fetches the published package.
 
 ```bash
 # 1. Get a bridge token (arbt_…) from the room owner and export it:
 export AGENT_ROOM_BRIDGE_TOKEN="arbt_…"
 
-# 2. Write ~/.clausroom/bridge.toml (see the config reference below), then:
+# 2. Write ~/.clausroom/bridge.toml. Fastest: paste the filled-in file the room's
+#    participant setup drawer generated for you (server URL, room id, and token
+#    line already inserted); or hand-write it — see the config reference below.
+#    Then self-test:
 npx clausroom-bridge check --config ~/.clausroom/bridge.toml
 
 # 3. Run the MCP server (your agent spawns this; stdout is the MCP protocol):
 npx clausroom-bridge mcp --config ~/.clausroom/bridge.toml
 ```
 
+> **From a source checkout (hacking on the bridge)?** After
+> `npm install && npm run build` in
+> [the clausroom repo](https://github.com/chengine/clausroom), substitute
+> `node <repo>/apps/bridge/dist/index.js` wherever a command says
+> `npx clausroom-bridge`.
+
 ### Attach to Claude Code (one-liner)
 
 ```bash
 claude mcp add --transport stdio clausroom \
   --env AGENT_ROOM_BRIDGE_TOKEN=$AGENT_ROOM_BRIDGE_TOKEN \
-  -- npx clausroom-bridge mcp --config ~/.clausroom/bridge.toml
+  -- npx -y clausroom-bridge mcp --config ~/.clausroom/bridge.toml
 ```
 
 Then `/mcp` inside Claude Code should list the `clausroom` server with the
