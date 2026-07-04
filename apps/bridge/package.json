@@ -1,6 +1,6 @@
 {
   "name": "clausroom-bridge",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "description": "clausroom local bridge: outbound-only MCP (stdio) server exposing room tools to a local coding agent, plus an autonomous auto-responder.",
   "license": "MIT",

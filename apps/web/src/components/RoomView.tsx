@@ -7,6 +7,7 @@ import { CONTINUE_MESSAGE_BODY, agentTurnRun, useRoomState } from '../useRoomSta
 import type { ConnectionState } from '../ws.js';
 import { ApprovalCard } from './ApprovalCard.js';
 import { Composer } from './Composer.js';
+import { ConnectAgentPanel } from './ConnectAgentPanel.js';
 import { MessageCard } from './MessageCard.js';
 import { OwnerDrawer } from './OwnerDrawer.js';
 import { Sidebar } from './Sidebar.js';
@@ -104,6 +105,12 @@ export function RoomView({ token, roomId, me, onBack, onUnauthorized }: RoomView
   const canSend = myParticipant?.can_send ?? false;
   const iAmOwner = state.myRole === 'owner';
   const iAmHuman = me.kind === 'human' && state.myRole !== 'observer';
+  // The my-agent endpoint is for any human participant (owner/human/observer);
+  // "my agent" is the agent in this room whose owner is me.
+  const iAmHumanParticipant = me.kind === 'human' && !!myParticipant;
+  const myAgent = state.participants.find(
+    (p) => p.user.kind === 'agent' && p.user.owner_user_id === me.id,
+  );
   const serverUrl = state.publicBaseUrl ?? effectiveOrigin();
 
   const workingSet = useMemo(() => new Set(state.workingUserIds), [state.workingUserIds]);
@@ -376,6 +383,11 @@ export function RoomView({ token, roomId, me, onBack, onUnauthorized }: RoomView
           canSend={canSend}
           colorOf={colorOf}
           nameOf={nameOf}
+          agentPanel={
+            iAmHumanParticipant ? (
+              <ConnectAgentPanel hasAgent={!!myAgent} onProvision={actions.provisionMyAgent} />
+            ) : null
+          }
           turnRun={turnRun}
           maxTurns={state.maxAutoTurns ?? DEFAULTS.MAX_AUTO_TURNS}
           approvals={state.approvals}

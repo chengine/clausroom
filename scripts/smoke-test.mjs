@@ -23,6 +23,7 @@ import Database from 'better-sqlite3';
 import WebSocket from 'ws';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { decodeJoinBlob, encodeJoinBlob } from '@clausroom/protocol';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SERVER_ENTRY = path.join(REPO_ROOT, 'apps', 'server', 'dist', 'index.js');
@@ -252,6 +253,47 @@ function inheritedChildEnv() {
     if (process.env[key] !== undefined) env[key] = process.env[key];
   }
   return env;
+}
+
+/**
+ * Spawn `node <args>` with the given env, capture stdout/stderr, and resolve
+ * { code, stdout, stderr } when the child exits. Rejects on timeout (killing the
+ * child) or spawn error. No shell (shell:true) — cross-platform and injection-safe.
+ */
+function runNodeCli(args, env, timeoutMs = 30_000) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => {
+      stdout += String(d);
+    });
+    child.stderr.on('data', (d) => {
+      stderr += String(d);
+    });
+    const timer = setTimeout(() => {
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        /* already dead */
+      }
+      reject(new SmokeFailure(`node ${args.slice(1).join(' ')} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    child.on('exit', (code) => {
+      clearTimeout(timer);
+      resolve({ code, stdout, stderr });
+    });
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+  });
+}
+
+/** Strip the `npx -y clausroom-bridge join ` prefix from a join_command line. */
+const JOIN_CMD_PREFIX = 'npx -y clausroom-bridge join ';
+function blobFromJoinCommand(joinCommand) {
+  return joinCommand.slice(JOIN_CMD_PREFIX.length).trim();
 }
 
 // ---------------------------------------------------------------------------
@@ -1556,9 +1598,220 @@ async function main() {
         });
       });
       assertEq(code, 0, `bundle --help exit code (stderr: ${stderr.slice(0, 200)})`);
-      for (const cmd of ['mcp', 'check', 'auto']) {
+      for (const cmd of ['mcp', 'check', 'auto', 'join']) {
         assert(new RegExp(`^\\s*${cmd}\\b`, 'm').test(stdout), `--help must list the ${cmd} subcommand`);
       }
+    });
+
+    // -- k. onboarding v2: self-service my-agent + one-command bridge join -------
+
+    // Base64url BridgeJoinBlob captured from POST …/my-agent, reused by the
+    // bridge-join step below (a still-valid token for the guest's own agent).
+    let joinBlob = null;
+
+    await step('my-agent-self-service', async () => {
+      // A brand-new human who owns no agent yet exercises the CREATE path; a
+      // second call ROTATES their bridge token (contract §3 POST …/my-agent).
+      const guestAdd = expectStatus(
+        await api('POST', `/api/rooms/${room.id}/participants`, {
+          token: student.token,
+          json: { display_name: 'Guest', kind: 'human', role: 'human' },
+        }),
+        201,
+        'add guest human',
+      );
+      const guestLogin = expectStatus(
+        await api('POST', '/api/auth/login', { json: { invite_token: guestAdd.data.invite_token } }),
+        200,
+        'guest login',
+      );
+      const guest = { token: guestLogin.data.session_token, user: guestLogin.data.user };
+
+      // CREATE: the guest provisions their own agent in-app (no owner relay).
+      const created = expectStatus(
+        await api('POST', `/api/rooms/${room.id}/my-agent`, {
+          token: guest.token,
+          json: { agent_name: "Guest's Own Agent" },
+        }),
+        200,
+        'my-agent create',
+      );
+      assert(
+        typeof created.data.bridge_token === 'string' && created.data.bridge_token.startsWith('arbt_'),
+        'my-agent create returns an arbt_ bridge_token',
+      );
+      assert(
+        typeof created.data.join_command === 'string' &&
+          created.data.join_command.startsWith(JOIN_CMD_PREFIX),
+        'join_command is a runnable `npx -y clausroom-bridge join <blob>` line',
+      );
+      assertEq(created.data.participant.role, 'agent', 'created participant role');
+      assertEq(created.data.participant.user.kind, 'agent', 'created participant kind');
+      assertEq(
+        created.data.participant.user.owner_user_id,
+        guest.user.id,
+        'created agent is owned by the guest',
+      );
+
+      // Decode the join_command's blob and assert its connection fields (§13).
+      const createdBlob = decodeJoinBlob(blobFromJoinCommand(created.data.join_command));
+      assertEq(createdBlob.v, 1, 'blob v');
+      assert(
+        typeof createdBlob.server_url === 'string' && createdBlob.server_url.length > 0,
+        'blob carries server_url',
+      );
+      assertEq(createdBlob.room_id, room.id, 'blob room_id matches this room');
+      assertEq(createdBlob.token, created.data.bridge_token, 'blob token equals the returned bridge_token');
+
+      // The returned bridge token opens the room.
+      expectStatus(
+        await api('GET', `/api/rooms/${room.id}`, { token: created.data.bridge_token }),
+        200,
+        'created bridge token opens the room',
+      );
+
+      // ROTATE: a second call revokes the old token and mints a fresh one, same participant.
+      const rotated = expectStatus(
+        await api('POST', `/api/rooms/${room.id}/my-agent`, { token: guest.token, json: {} }),
+        200,
+        'my-agent rotate',
+      );
+      assert(rotated.data.bridge_token.startsWith('arbt_'), 'rotate returns an arbt_ bridge_token');
+      assert(
+        rotated.data.bridge_token !== created.data.bridge_token,
+        'rotation mints a different bridge token',
+      );
+      assertEq(
+        rotated.data.participant.user_id,
+        created.data.participant.user_id,
+        'rotation keeps the same agent participant',
+      );
+
+      // Old token is now revoked (401); the freshly rotated one still works (200).
+      expectError(
+        await api('GET', `/api/rooms/${room.id}`, { token: created.data.bridge_token }),
+        401,
+        'unauthorized',
+        'rotated-away bridge token is revoked',
+      );
+      expectStatus(
+        await api('GET', `/api/rooms/${room.id}`, { token: rotated.data.bridge_token }),
+        200,
+        'freshly rotated bridge token opens the room',
+      );
+
+      // Hand the still-valid rotated blob to the bridge-join step.
+      joinBlob = blobFromJoinCommand(rotated.data.join_command);
+    });
+
+    await step('bridge-join-command', async () => {
+      assert(joinBlob, 'no join blob captured from the my-agent step');
+      const joinToken = decodeJoinBlob(joinBlob).token;
+
+      // (1) --print: touch nothing; show the safe-default bridge.toml + attach line.
+      const printProject = path.join(tmpRoot, 'join-print-project');
+      await fsp.mkdir(printProject, { recursive: true });
+      const printed = await runNodeCli(
+        [BRIDGE_ENTRY, 'join', joinBlob, '--project', printProject, '--print'],
+        { ...inheritedChildEnv(), HOME: bridgeHome, USERPROFILE: bridgeHome },
+        30_000,
+      );
+      assertEq(printed.code, 0, `join --print exit code (stderr: ${printed.stderr.slice(0, 300)})`);
+      const printOut = printed.stdout;
+      assert(/read_only_default\s*=\s*true/.test(printOut), 'printed bridge.toml sets read_only_default = true');
+      assert(
+        /allow_agent_to_upload_files\s*=\s*false/.test(printOut),
+        'printed bridge.toml keeps uploads off by default',
+      );
+      assert(
+        printOut.includes(`[${JSON.stringify(printProject)}]`),
+        `printed roots must be [<chosen project dir>]; got:\n${printOut}`,
+      );
+      assert(
+        printOut.includes('npx -y clausroom-bridge mcp'),
+        'printed the `npx -y clausroom-bridge mcp` attach line',
+      );
+      // --print must not touch the default config path.
+      assert(
+        !fs.existsSync(path.join(bridgeHome, '.clausroom', 'bridge.toml')),
+        '--print must not write bridge.toml',
+      );
+
+      // (2) real write into a throwaway HOME: writes ~/.clausroom/bridge.toml with
+      //     safe defaults and NEVER the raw token (it rides via token_env).
+      const joinHome = path.join(tmpRoot, 'join-home');
+      const writeProject = path.join(tmpRoot, 'join-write-project');
+      await fsp.mkdir(joinHome, { recursive: true });
+      await fsp.mkdir(writeProject, { recursive: true });
+      const written = await runNodeCli(
+        [BRIDGE_ENTRY, 'join', joinBlob, '--project', writeProject, '--yes'],
+        {
+          ...inheritedChildEnv(),
+          HOME: joinHome,
+          USERPROFILE: joinHome,
+          // Keep `claude` off PATH so join prints the copy-paste `claude mcp add`
+          // line instead of spawning it — deterministic, no external dependency.
+          PATH: tmpRoot,
+          Path: tmpRoot,
+        },
+        30_000,
+      );
+      assertEq(written.code, 0, `join write exit code (stderr: ${written.stderr.slice(0, 300)})`);
+
+      const configPath = path.join(joinHome, '.clausroom', 'bridge.toml');
+      assert(fs.existsSync(configPath), `join must write ${configPath}`);
+      const toml = fs.readFileSync(configPath, 'utf8');
+      assert(/read_only_default\s*=\s*true/.test(toml), 'written bridge.toml sets read_only_default = true');
+      assert(
+        /allow_agent_to_upload_files\s*=\s*false/.test(toml),
+        'written bridge.toml keeps uploads off by default',
+      );
+      assert(
+        toml.includes(`[${JSON.stringify(writeProject)}]`),
+        `written roots must be [<chosen project dir>]; got:\n${toml}`,
+      );
+      assert(
+        /token_env\s*=\s*"AGENT_ROOM_BRIDGE_TOKEN"/.test(toml),
+        'written config references the token via token_env',
+      );
+      assert(!toml.includes(joinToken), 'the raw bridge token must NEVER be written into bridge.toml');
+    });
+
+    await step('join-route-served', async () => {
+      // /join is a CLIENT route: the SPA index.html is returned and the fragment
+      // credential is consumed in the browser (contract §1 "Web join links").
+      const res = await api('GET', '/join', { raw: true });
+      assertEq(res.status, 200, 'GET /join status');
+      assert(
+        (res.headers.get('content-type') ?? '').includes('text/html'),
+        `GET /join content-type: ${res.headers.get('content-type')}`,
+      );
+      const html = res.buffer.toString('utf8');
+      assert(html.includes('<title>clausroom</title>'), 'GET /join serves the SPA index.html');
+      assert(html.includes('id="root"'), 'GET /join index.html has the root div');
+    });
+
+    await step('join-blob-roundtrip', async () => {
+      // encodeJoinBlob -> decodeJoinBlob is a lossless round-trip (contract §13).
+      const input = {
+        v: 1,
+        server_url: 'https://agent-room-host.example-tailnet.ts.net',
+        room_id: room.id,
+        token: `arbt_${'0123456789abcdef'.repeat(2)}`,
+        agent_name: 'Round Trip Agent',
+      };
+      const encoded = encodeJoinBlob(input);
+      assert(typeof encoded === 'string' && encoded.length > 0, 'encode produced a blob');
+      assert(!encoded.includes('='), 'encoded blob is unpadded base64url');
+      const decoded = decodeJoinBlob(encoded);
+      assertEq(decoded.v, input.v, 'roundtrip v');
+      assertEq(decoded.server_url, input.server_url, 'roundtrip server_url');
+      assertEq(decoded.room_id, input.room_id, 'roundtrip room_id');
+      assertEq(decoded.token, input.token, 'roundtrip token');
+      assertEq(decoded.agent_name, input.agent_name, 'roundtrip agent_name');
+      // decode tolerates surrounding whitespace / padding (§13).
+      const loose = decodeJoinBlob(`  ${encoded}  `);
+      assertEq(loose.token, input.token, 'decode tolerates surrounding whitespace');
     });
   } catch (err) {
     if (!(err instanceof AbortRun)) {

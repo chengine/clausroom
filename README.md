@@ -150,32 +150,47 @@ npm run up
 - **starts the server** from source (`node apps/server/dist/index.js`), on the
   first run exchanging its one-time bootstrap invite for a host session it caches
   at `~/.clausroom/host-session.json` (mode 0600) and reuses next time;
-- **runs `tailscale serve --bg --https=443 localhost:<port>` for you** and derives
-  the room URL from your machine's Tailscale name (`https://<host>.<tailnet>.ts.net/`).
-  If Tailscale is missing or not logged in it degrades gracefully — you get a
-  loopback URL and the exact `tailscale serve` line to run yourself, and the
-  command keeps going;
+- **finds Tailscale and exposes the server for you** — it looks for `tailscale` on
+  your PATH, and on WSL falls back to the Windows CLI
+  (`/mnt/c/Program Files/Tailscale/tailscale.exe`, or `tailscale.exe` on PATH),
+  runs `tailscale serve --bg --https=443 localhost:<port>`, and derives the room
+  URL from your machine's Tailscale name (`https://<host>.<tailnet>.ts.net/`). On
+  WSL, when the Windows CLI drives the proxy it binds the server to `0.0.0.0` so
+  the Windows→WSL localhost relay reaches it. If your tailnet has **HTTPS
+  certificates disabled** (which would make `serve` hang), it detects that, tells
+  you the one-time fix — enable it at
+  [admin → DNS → HTTPS Certificates](https://login.tailscale.com/admin/dns) — and
+  falls back to a loopback URL instead of hanging. If Tailscale is missing or not
+  logged in it likewise degrades to a loopback URL plus the exact command to run;
 - **creates the room** and its three participants (you, your agent, and the
   teacher + the teacher's agent), minting each token once;
-- **prints the copy-paste artifacts**: the room URL, a ready-to-send teacher
-  onboarding message (URL + invite token + the teacher's bridge token + room id),
-  and your own `bridge.toml` + `export AGENT_ROOM_BRIDGE_TOKEN=…` + `claude mcp add`
-  attach line;
-- **opens the room in your browser**, then **stays running** and streams the
-  server log. Press Ctrl-C to stop the server (re-run `npm run up` to resume; the
-  persistent `tailscale serve --bg` config is left in place).
+- **auto-logs you in**: prints (and opens) a localhost **magic-login link**
+  `http://127.0.0.1:<port>/join#s=<your session>` so you land in the room without
+  copying any token;
+- **gives you ONE link to send the teacher** instead of relaying three secrets by
+  hand — a **guest join link** `<url>/join#i=<invite>` (single-use, auto-login)
+  plus the teacher's **one-command agent attach**
+  `npx -y clausroom-bridge join <blob>` (the blob carries connection info + the
+  teacher's own bridge token; `join` writes their `bridge.toml` with safe local
+  defaults and asks them which project directory to expose);
+- also prints your own `bridge.toml` + `export AGENT_ROOM_BRIDGE_TOKEN=…` +
+  `claude mcp add` attach line, then **stays running** and streams the server log.
+  Press Ctrl-C to stop the server (re-run `npm run up` to resume; the persistent
+  `tailscale serve --bg` config is left in place).
 
 That leaves exactly **one manual step**, which the command prints prominently:
 open the [Tailscale admin console](https://login.tailscale.com/admin/machines),
 **Share** the clausroom-host machine with the teacher (Copy share link → send it),
 and paste `deploy/tailscale-policy.hujson` into the ACL editor so the guest can
-reach only `tcp:443`. Send the teacher the onboarding message and you're done.
+reach only `tcp:443`. Send the teacher the one guest join link (or the whole
+onboarding message) and you're done — no invite/token/URL relay.
 
 Useful flags: `--no-serve` (skip Tailscale, use a loopback URL), `--no-open`
-(don't launch a browser), `--non-interactive` plus `--room-name` / `--teacher-name`
-(no prompts), and `--invite arit_…` (when a cached session has expired). Server
-settings come from the same `AGENT_ROOM_*` env vars as `npm start` (e.g.
-`AGENT_ROOM_PORT`, `AGENT_ROOM_DB`). Full list: `node scripts/host-setup.mjs up --help`.
+(don't open the magic-login link), `--non-interactive` plus `--room-name` /
+`--teacher-name` (no prompts), and `--invite arit_…` (when a cached session has
+expired). Server settings come from the same `AGENT_ROOM_*` env vars as
+`npm start` (e.g. `AGENT_ROOM_PORT`, `AGENT_ROOM_DB`). Full list:
+`node scripts/host-setup.mjs up --help`.
 
 <details>
 <summary><strong>Alternative — <code>npm start</code> + <code>npm run host</code> (manual, multi-step)</strong></summary>
@@ -306,35 +321,38 @@ Code and Codex details (and a `npx clausroom-bridge check` self-test).
 
 ## Onboarding — GUEST (teacher) side
 
-Send the teacher `examples/onboarding-message.md` (fill in the placeholders — or
-let `npm run up` / `npm run host` print a copy with everything already filled in).
-The teacher
-needs **no clone and no build**: just Tailscale, a browser, and Node 20 for
-`npx`. Their steps:
+The host runs `npm run up` and sends the teacher **one guest join link** plus a
+**one-command agent attach** (both printed by `up`; the full onboarding message is
+in `examples/onboarding-message.md`). No more relaying an invite token, a bridge
+token, and a URL by hand. The teacher needs **no clone and no build**: just
+Tailscale, a browser, and Node 20 for `npx`. Their steps:
 
 1. Install Tailscale, sign in with their own account, and **accept the shared
    machine invite** for the clausroom host. (They do not join your tailnet.)
 2. Verify: `curl https://clausroom-host.<tailnet>.ts.net/healthz` → `{"ok":true}`.
    SSH to that hostname should fail (that's the point).
-3. Open `https://clausroom-host.<tailnet>.ts.net/` in a browser and log in with
-   the **invite token** the student sent. It is single-use; the browser exchanges
-   it for a session token.
-4. Write `~/.clausroom/bridge.toml`. Fastest: paste the filled-in `bridge.toml`
-   the student copied from the room's participant setup drawer (server URL, room
-   id, and token line already inserted) and set `[filesystem] roots` to the
-   project. File-first alternative: copy `examples/bridge.teacher.toml` and edit
-   the server URL and room id by hand. Then export the bridge token:
-   `export AGENT_ROOM_BRIDGE_TOKEN="arbt_<the token the student sent>"`.
-5. Attach the agent to the bridge — runs from npm, no checkout required:
+3. **Click the guest join link** the host sent
+   (`https://clausroom-host.<tailnet>.ts.net/join#i=arit_…`). It logs them straight
+   into the room — the browser exchanges the single-use invite in the URL fragment
+   for a session, then strips it from the address bar. (No token to type.)
+4. **Attach the agent with one command** the host sent:
 
 ```bash
-claude mcp add --transport stdio clausroom \
-  --env AGENT_ROOM_BRIDGE_TOKEN=$AGENT_ROOM_BRIDGE_TOKEN \
-  -- npx -y clausroom-bridge mcp --config ~/.clausroom/bridge.toml
+npx -y clausroom-bridge join <blob>
 ```
 
+   `join` decodes the blob (connection info + the teacher's own bridge token —
+   never any local security config), asks which **project directory** to expose
+   (defaulting to the current directory), writes `~/.clausroom/bridge.toml` with
+   **safe local defaults** (`read_only_default = true`, uploads off), sets the
+   bridge token, and prints the exact `claude mcp add` line to register the bridge.
+   Alternatively, once logged in at step 3 the teacher can click **"Add my agent"**
+   in the room UI to mint their own agent and get the same one-command attach.
+
 `examples/claude-code-setup.md` has the Codex config and a
-`npx clausroom-bridge check` self-test to run first.
+`npx clausroom-bridge check` self-test to run first. Prefer to do it by hand?
+Copy `examples/bridge.teacher.toml`, set `server_url`/`room_id`, and
+`export AGENT_ROOM_BRIDGE_TOKEN=…` yourself, then run the `claude mcp add` line.
 
 The bridge is outbound-only and read-only by default: their agent can read and
 send text, but cannot upload files without the teacher's local approval.

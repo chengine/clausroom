@@ -10,6 +10,7 @@ import type {
   Approval,
   Artifact,
   Message,
+  MyAgentResponse,
   Participant,
   Role,
   Room,
@@ -184,6 +185,8 @@ export interface RoomActions {
   respondApproval: (approvalId: string, decision: 'approved' | 'denied') => Promise<void>;
   addParticipant: (body: AddParticipantRequest) => Promise<api.AddParticipantResult>;
   rotateToken: (userId: string) => Promise<api.RotateTokenResult>;
+  /** Self-service: create/reconnect the caller's own agent, minting its bridge token. */
+  provisionMyAgent: (agentName?: string) => Promise<MyAgentResponse>;
   exportTranscript: () => Promise<void>;
   downloadArtifact: (artifact: Artifact) => Promise<void>;
 }
@@ -434,6 +437,17 @@ export function useRoomState(
     [guard, token, roomId],
   );
 
+  const provisionMyAgent = useCallback(
+    async (agentName?: string) => {
+      const result = await guard(api.provisionMyAgent(token, roomId, agentName));
+      // Reflect the created/updated agent participant in the roster immediately
+      // (a fresh create arrives over WS too, but this avoids a flash of absence).
+      dispatch({ type: 'participant', participant: result.participant });
+      return result;
+    },
+    [guard, token, roomId],
+  );
+
   const exportTranscript = useCallback(
     () => guard(api.downloadTranscript(token, roomId)),
     [guard, token, roomId],
@@ -454,6 +468,7 @@ export function useRoomState(
       respondApproval,
       addParticipant,
       rotateToken,
+      provisionMyAgent,
       exportTranscript,
       downloadArtifact,
     },

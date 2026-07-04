@@ -102,6 +102,43 @@ Response `200`:
 
 `rooms` lists every room where the caller is a participant, ascending by `created_at`.
 
+### Web join links (`/join`)
+
+To eliminate manual token relay, the web UI serves a `/join` route that reads its
+credential from the URL **fragment** (`location.hash`) — never the query string —
+so the token is never sent to the server as a query parameter and never lands in
+access logs or the `Referer` header. Two link shapes are defined:
+
+| Link | Shape | Delivered over | Purpose |
+|------|-------|----------------|---------|
+| Guest human join | `<public_base_url>/join#i=<arit_ invite>` | trusted channel / in-app | Single-use: the browser exchanges the invite for a session and routes into the room. |
+| Host magic-login | `http://127.0.0.1:<port>/join#s=<arst_ session>` | localhost only (printed by host setup) | The browser stores the session directly (no invite exchange) and routes in. |
+
+`<public_base_url>` is `AGENT_ROOM_PUBLIC_BASE_URL` when set (else the browser
+origin); it is also returned as `public_base_url` by `GET /api/rooms/:id` (§3).
+
+**`/join` client behavior (BINDING):**
+
+1. Read `location.hash`; parse the fragment as `key=value`. Recognize exactly two
+   keys: `i` (an `arit_` invite) and `s` (an `arst_` session). If both are present,
+   `s` wins.
+2. For `i=<invite>`: `POST /api/auth/login` with `{ invite_token }`; on success
+   store the returned `session_token` as the active session.
+3. For `s=<session>`: store the session token directly (no server call to
+   authenticate — the first authenticated request, e.g. `GET /api/me`, validates it).
+4. **Immediately strip the fragment** from the URL (`history.replaceState` to the
+   bare `/join` path or the room path) so the credential is not left in the address
+   bar, history, or any later `Referer`.
+5. Resolve the landing room via `GET /api/me`: route into the caller's most-recently
+   created room, or the rooms home when they belong to none.
+6. On any error (missing/garbled fragment, `401` from login on a used/unknown/expired
+   invite, network failure) show a friendly message and fall back to the manual
+   invite/session-token entry form (the existing login screen).
+
+Invite links are single-use (§1 rule 6): a second visit to the same `#i=` link
+fails login and drops to the manual fallback. The fragment credential is a bearer
+token — treat these links as secrets and deliver them over a trusted channel.
+
 ---
 
 ## 2. Bootstrap (first run)
@@ -258,6 +295,63 @@ or
 ```
 
 Errors: `404 not_found` (no such participant in this room).
+
+### POST /api/rooms/:id/my-agent
+
+Auth: **the caller must be an authenticated HUMAN participant of this room** (session
+token; bridge tokens and non-participants → `403 forbidden` — non-participants get
+`404 not_found` per the `/api/rooms/:id/**` hiding rule). Self-service agent
+provisioning: it lets a logged-in guest mint/rotate **their own** agent's bridge
+token in-app, so the room owner no longer has to relay bridge tokens out of band.
+This is in addition to the owner-driven `POST /api/rooms/:id/participants`, which
+stays as-is.
+
+Request (`MyAgentRequestSchema`):
+
+```json
+{ "agent_name": "Timothy's Agent", "role": "agent" }
+```
+
+Both fields optional: `role` defaults to `"agent"` (the only accepted value;
+anything else → `422 validation`); `agent_name` names a **newly created** agent and
+is ignored when rotating.
+
+Behavior (BINDING):
+
+- **Ownership scope.** "The caller's agent" is the agent participant of this room
+  whose user `owner_user_id` == the caller's user id. A caller owns at most one such
+  agent for the purposes of this endpoint.
+- **Rotate if it exists:** if the caller already owns an agent participant in this
+  room, revoke all of that agent's bridge tokens for this room and mint a fresh one
+  (same semantics as `POST …/participants/:userId/token` for an agent). The
+  participant is unchanged; `agent_name` is ignored.
+- **Create otherwise:** create a new agent user with `kind` `"agent"`,
+  `owner_user_id` = the caller, `display_name` = `agent_name` when provided (else a
+  server default such as `"<caller display_name>'s Agent"`), insert it as a
+  participant with role `agent` (`can_send` true, `can_upload` true, `paused` false),
+  and mint its bridge token (`arbt_`, `tokens.room_id` = this room).
+
+Response `200` (`MyAgentResponseSchema`) — the raw `bridge_token` is shown **exactly
+once**, here, whether created or rotated:
+
+```json
+{
+  "participant": { "room_id": "room_a1b2c3d4e5f60718293a4b5c", "user_id": "user_agent7agent7agent7agen", "role": "agent", "can_send": true, "can_upload": true, "paused": false, "user": { "id": "user_agent7agent7agent7agen", "display_name": "Timothy's Agent", "kind": "agent", "is_admin": false, "owner_user_id": "user_1a2b3c4d5e6f708192a3b4c5", "created_at": "2026-07-02T19:03:00.000Z" } },
+  "bridge_token": "arbt_00112233445566778899aabbccddeeff00112233",
+  "join_command": "npx -y clausroom-bridge join eyJ2IjoxLCJzZXJ2ZXJfdXJsIjoi..."
+}
+```
+
+`join_command` is the ready-to-run `npx -y clausroom-bridge join <blob>` string,
+where `<blob>` is a base64url `BridgeJoinBlob` (§13) carrying `{ v:1, server_url,
+room_id, token: <this bridge_token>, agent_name? }`. `server_url` in the blob is
+`AGENT_ROOM_PUBLIC_BASE_URL` when set, else the request's origin. The guest copies
+this one line, runs it, chooses a project directory, and is attached — no manual
+`bridge.toml` editing.
+
+**Security invariant:** this endpoint returns connection info plus the caller's OWN
+bridge token only. It never sets or returns the recipient's local security config;
+`clausroom-bridge join` writes `bridge.toml` with safe local defaults (§13).
 
 ### POST /api/rooms/:id/pause
 
@@ -982,6 +1076,56 @@ secret filename/content scan (`SECRET_NAME_GLOBS`, `SECRET_CONTENT_PATTERNS`, fi
 test as the server gate in §5), require an approved approval before uploading —
 and verify the approval is the agent's own `artifact_upload` approval whose
 payload `sha256`/`size_bytes` match the file about to be uploaded.
+
+### Join blob & `clausroom-bridge join <blob>` (one-command attach)
+
+The one-command bridge attach avoids hand-editing `bridge.toml`. A **join blob** is
+`base64url(JSON)` (no padding) of `BridgeJoinBlobSchema` from `@clausroom/protocol`:
+
+```json
+{
+  "v": 1,
+  "server_url": "https://agent-room-host.tailnet.ts.net",
+  "room_id": "room_a1b2c3d4e5f60718293a4b5c",
+  "token": "arbt_00112233445566778899aabbccddeeff00112233",
+  "agent_name": "Timothy's Agent"
+}
+```
+
+Fields: `v` is the literal `1`; `server_url` is an http(s) URL (trailing slashes
+stripped on encode); `room_id` is a `room_` id; `token` is the recipient's OWN
+`arbt_` bridge token; `agent_name` is optional. Encode/decode **only** via
+`encodeJoinBlob()` / `decodeJoinBlob()` from `@clausroom/protocol` (base64url, no
+padding, using `node:buffer`; decode tolerates padding and surrounding whitespace
+and re-validates against the schema, throwing on any malformed input). The blob is
+produced by `POST /api/rooms/:id/my-agent` (§3, embedded in `join_command`).
+
+**`clausroom-bridge join <blob>` semantics (BINDING):**
+
+1. Decode + validate the blob (`decodeJoinBlob`). On failure, exit non-zero with a
+   clear message.
+2. Prompt the joining user for the project directory to expose (`filesystem.roots`),
+   **defaulting to the current working directory**; the user (never the blob)
+   chooses it.
+3. Write `~/.clausroom/bridge.toml` (or `--config <path>`) with **safe local
+   defaults**: `[room]` `server_url`/`room_id` from the blob and `token_env =
+   "AGENT_ROOM_BRIDGE_TOKEN"`; `[identity]` seeded (`agent_name` from the blob when
+   present); `[policy] read_only_default = true` with the write flags left at their
+   safe defaults (`allow_agent_to_upload_files = false`); `[filesystem] roots` = the
+   chosen directory, `deny_globs = []` (added to `DEFAULT_DENY_GLOBS`). The blob's
+   `token` is stored **only** by exporting it as the `AGENT_ROOM_BRIDGE_TOKEN`
+   value the config references (printed for the user to export / written to a local
+   env file) — it is a bearer credential, delivered over the trusted in-app channel.
+4. Register / print the `claude mcp add` line so the local agent can spawn the
+   bridge (`clausroom-bridge mcp`).
+
+**SECURITY INVARIANT (do not violate).** The room server runs on the HOST; it must
+never set or push a participant's LOCAL security config. The join blob carries
+connection info plus the recipient's own bearer token **only** — never filesystem
+roots, tool scope, or upload policy. `clausroom-bridge join` therefore writes LOCAL
+config with SAFE DEFAULTS (`read_only_default = true`; `roots` = the directory the
+user chooses, defaulting to cwd, **never** server-provided). Tokens are bearer
+credentials sent over a trusted channel; they never widen anyone's local bounds.
 
 ### `[auto]` — autonomous engine adapter (`clausroom-bridge auto`, Milestone 5)
 

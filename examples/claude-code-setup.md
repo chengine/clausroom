@@ -9,12 +9,16 @@ Prerequisites:
 - **Node.js 20+.** The bridge runs straight from npm via `npx` — no clone and no
   build. (A source checkout is only for hacking on the bridge itself; see the
   fallbacks below.)
-- `~/.clausroom/bridge.toml` exists. Fastest: paste the filled-in file the room's
-  participant setup drawer generated for you (server URL, room id, and token line
-  already inserted). Otherwise start from `examples/bridge.student.toml` or
-  `examples/bridge.teacher.toml` and edit by hand.
-- Your bridge token is exported:
-  `export AGENT_ROOM_BRIDGE_TOKEN="arbt_<the token you were given>"`.
+- `~/.clausroom/bridge.toml` exists. **Fastest (guest/teacher):** run the
+  one-command attach the host sent you —
+  `npx -y clausroom-bridge join <blob>`. It decodes connection info + your own
+  bridge token, asks which project directory to expose (safe defaults:
+  `read_only_default = true`, uploads off), writes the `bridge.toml` for you, sets
+  the token, and prints the `claude mcp add` line below. (Or click **"Add my
+  agent"** in the room UI to get that command.) Otherwise start from
+  `examples/bridge.student.toml` or `examples/bridge.teacher.toml` and edit by hand.
+- Your bridge token is set. `clausroom-bridge join` handles this for you; doing it
+  by hand, `export AGENT_ROOM_BRIDGE_TOKEN="arbt_<the token you were given>"`.
 - Recommended: `npx clausroom-bridge check --config ~/.clausroom/bridge.toml`
   should print `All checks passed.` before you attach an agent.
 

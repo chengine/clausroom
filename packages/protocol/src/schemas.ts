@@ -221,6 +221,84 @@ export const UpdateSummaryRequestSchema = z.object({
 export type UpdateSummaryRequest = z.infer<typeof UpdateSummaryRequestSchema>;
 
 // ---------------------------------------------------------------------------
+// Self-service agent provisioning & bridge join blob (onboarding v2)
+// See docs/API-CONTRACT.md §3 (POST /api/rooms/:id/my-agent) and §13
+// (BridgeJoinBlob + `clausroom-bridge join`).
+// ---------------------------------------------------------------------------
+
+/**
+ * POST /api/rooms/:id/my-agent request body. The caller — an authenticated HUMAN
+ * participant (session token) — provisions THEIR OWN agent: if they already own an
+ * agent participant in this room its bridge token is rotated; otherwise a new agent
+ * participant is created with owner_user_id = the caller. This removes the
+ * out-of-band bridge-token relay (a logged-in guest gets their own token in-app).
+ */
+export const MyAgentRequestSchema = z.object({
+  /**
+   * Display name for a newly created agent (defaults server-side, e.g.
+   * "<human>'s Agent"). Ignored when rotating an existing agent's token.
+   */
+  agent_name: z.string().min(1).max(100).optional(),
+  /** Only 'agent' is valid; present for forward-compat. Defaults to 'agent'. */
+  role: z.literal('agent').default('agent'),
+});
+export type MyAgentRequest = z.infer<typeof MyAgentRequestSchema>;
+
+/**
+ * POST /api/rooms/:id/my-agent response. The raw `bridge_token` is shown exactly
+ * ONCE here (on create OR rotate); `join_command` is the ready-to-run
+ * `npx -y clausroom-bridge join <blob>` string embedding a BridgeJoinBlob for the
+ * one-command bridge attach.
+ */
+export const MyAgentResponseSchema = z.object({
+  participant: ParticipantSchema,
+  /** Raw arbt_ bridge token — returned only in this response, never again. */
+  bridge_token: z.string(),
+  /** `npx -y clausroom-bridge join <base64url blob>` — one-command bridge attach. */
+  join_command: z.string(),
+});
+export type MyAgentResponse = z.infer<typeof MyAgentResponseSchema>;
+
+/**
+ * Bridge join blob — base64url(JSON), no padding — carried by the
+ * `clausroom-bridge join <blob>` command and embedded in
+ * MyAgentResponse.join_command. Use encodeJoinBlob()/decodeJoinBlob() (join.ts).
+ *
+ * SECURITY INVARIANT: the blob encodes only CONNECTION info plus the recipient's
+ * OWN bridge token. It NEVER carries local security config (filesystem roots, tool
+ * scope, upload policy). `clausroom-bridge join` writes bridge.toml with SAFE LOCAL
+ * DEFAULTS (read_only_default=true; roots chosen by the joining user, defaulting to
+ * cwd — never server-provided). See docs/API-CONTRACT.md §13.
+ */
+export const BridgeJoinBlobSchema = z.object({
+  /** Schema version; only 1 is defined. */
+  v: z.literal(1),
+  /** Room server base URL (http/https). Trailing slashes are stripped. */
+  server_url: z
+    .string()
+    .min(1)
+    .transform((s) => s.replace(/\/+$/, ''))
+    .refine(
+      (s) => {
+        try {
+          const u = new URL(s);
+          return u.protocol === 'http:' || u.protocol === 'https:';
+        } catch {
+          return false;
+        }
+      },
+      { message: 'server_url must be an http(s) URL' },
+    ),
+  /** Target room id (`room_` + 24 hex). */
+  room_id: z.string().regex(/^room_[0-9a-f]{24}$/, 'room_id must be a room_ id'),
+  /** The joining agent's OWN bridge token (`arbt_` + 32 hex). */
+  token: z.string().regex(/^arbt_[0-9a-f]{32}$/, 'token must be an arbt_ bridge token'),
+  /** Optional display name used to seed [identity].agent_name in bridge.toml. */
+  agent_name: z.string().min(1).max(100).optional(),
+});
+export type BridgeJoinBlob = z.infer<typeof BridgeJoinBlobSchema>;
+
+// ---------------------------------------------------------------------------
 // WebSocket frames (server -> client), discriminated on "type"
 // ---------------------------------------------------------------------------
 

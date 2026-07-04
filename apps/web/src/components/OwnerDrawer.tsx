@@ -7,6 +7,7 @@ import {
   bridgeToml,
   claudeMcpAddCommand,
   exportTokenLine,
+  guestJoinLink,
   humanOnboardingText,
 } from '../snippets.js';
 import { CopyButton } from './CopyButton.js';
@@ -290,30 +291,55 @@ function TokenModal({
         </header>
 
         <p className="modal__warning">
-          This {minted.tokenKind === 'bridge' ? 'bridge' : 'invite'} token is shown <strong>once</strong>.
-          Copy it now and share it over a private channel.
+          This {minted.tokenKind === 'bridge' ? 'bridge token is' : 'invite link is'} shown{' '}
+          <strong>once</strong>. Copy it now and share it over a private channel.
         </p>
 
-        <div className="token-box">
-          <code className="token-box__value">{minted.token}</code>
-          <CopyButton text={minted.token} label="Copy token" />
-        </div>
-
         {minted.tokenKind === 'invite' ? (
-          <div className="snippet">
-            <div className="snippet__head">
-              <span className="snippet__title">Onboarding message for {minted.participantName}</span>
-              <CopyButton
-                text={humanOnboardingText({ serverUrl, roomName, inviteToken: minted.token })}
-                label="Copy"
-              />
+          <>
+            <div className="snippet">
+              <div className="snippet__head">
+                <span className="snippet__title">Guest join link</span>
+                <CopyButton
+                  text={guestJoinLink(serverUrl, minted.token)}
+                  label="Copy link"
+                />
+              </div>
+              <pre className="snippet__pre">{guestJoinLink(serverUrl, minted.token)}</pre>
             </div>
-            <pre className="snippet__pre">
-              {humanOnboardingText({ serverUrl, roomName, inviteToken: minted.token })}
-            </pre>
-          </div>
+            <p className="field__hint">
+              Send this one link to {minted.participantName}. It signs them in and drops them
+              straight into the room — no token to paste. The link works once.
+            </p>
+
+            <div className="token-box">
+              <code className="token-box__value">{minted.token}</code>
+              <CopyButton text={minted.token} label="Copy token" />
+            </div>
+            <p className="field__hint">
+              Fallback: if the link won&rsquo;t open, they can paste this raw invite token on the
+              sign-in screen at {serverUrl}/.
+            </p>
+
+            <div className="snippet">
+              <div className="snippet__head">
+                <span className="snippet__title">Full invite message</span>
+                <CopyButton
+                  text={humanOnboardingText({ serverUrl, roomName, inviteToken: minted.token })}
+                  label="Copy"
+                />
+              </div>
+              <pre className="snippet__pre">
+                {humanOnboardingText({ serverUrl, roomName, inviteToken: minted.token })}
+              </pre>
+            </div>
+          </>
         ) : (
           <>
+            <div className="token-box">
+              <code className="token-box__value">{minted.token}</code>
+              <CopyButton text={minted.token} label="Copy token" />
+            </div>
             <div className="snippet">
               <div className="snippet__head">
                 <span className="snippet__title">~/.clausroom/bridge.toml</span>

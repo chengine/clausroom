@@ -12,6 +12,11 @@
  *                           messages addressed to this agent by driving a
  *                           local engine (claude | codex [EXPERIMENTAL] |
  *                           custom) per the [auto] section of bridge.toml.
+ *   join  <blob>            One-command attach: decode a base64url join blob
+ *                           (from the room's "Add my agent" flow), write
+ *                           bridge.toml with SAFE LOCAL DEFAULTS, print/run the
+ *                           token export + `claude mcp add` lines, then check
+ *                           connectivity.
  */
 
 import { Command } from 'commander';
@@ -99,7 +104,7 @@ program
       'exposing MCP tools (stdio) to a local coding agent, plus an autonomous ' +
       'auto-responder (`auto`) that drives a local engine.',
   )
-  .version('0.1.1');
+  .version('0.1.2');
 
 program
   .command('mcp')
@@ -146,6 +151,37 @@ program
     } catch (err) {
       process.stderr.write(
         `${err instanceof ConfigError ? err.message : `auto responder failed: ${err instanceof Error ? err.message : String(err)}`}\n`,
+      );
+      process.exit(1);
+    }
+  });
+
+program
+  .command('join')
+  .description(
+    'One-command attach: decode a base64url join blob (from the room\'s "Add my agent" ' +
+      'flow), write bridge.toml with SAFE LOCAL DEFAULTS (read-only; roots = the project ' +
+      'dir you choose, defaulting to cwd), print the token export + `claude mcp add` lines ' +
+      '(or run `claude mcp add` when claude is on PATH), then validate connectivity. ' +
+      'The blob never sets your local security config; the token is your own bearer credential.',
+  )
+  .argument('<blob>', 'base64url join blob printed by POST /api/rooms/:id/my-agent (join_command)')
+  .option('-c, --config <path>', `path to bridge.toml (default: ${DEFAULT_CONFIG_PATH})`)
+  .option('-p, --project <dir>', 'project directory to expose as filesystem.roots (default: prompt, else cwd)')
+  .option('-y, --yes', 'assume defaults and overwrite an existing config without prompting')
+  .option('--print', 'print what would be written/run without touching anything')
+  .action(async (blob: string, opts: { config?: string; project?: string; yes?: boolean; print?: boolean }) => {
+    try {
+      const { runJoin } = await import('./join.js');
+      const result = await runJoin(blob, opts);
+      if (!result.runCheck) {
+        process.exit(0);
+      }
+      const code = await runCheck(result.configPath);
+      process.exit(code);
+    } catch (err) {
+      process.stderr.write(
+        `${err instanceof ConfigError ? err.message : `join failed: ${err instanceof Error ? err.message : String(err)}`}\n`,
       );
       process.exit(1);
     }

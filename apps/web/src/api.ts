@@ -8,6 +8,7 @@ import {
   ApprovalSchema,
   ArtifactSchema,
   MessageSchema,
+  MyAgentResponseSchema,
   ParticipantSchema,
   RoleSchema,
   RoomSchema,
@@ -17,6 +18,7 @@ import {
   type ApprovalStatus,
   type Artifact,
   type Message,
+  type MyAgentResponse,
   type Participant,
   type PostMessageRequest,
   type Role,
@@ -352,6 +354,24 @@ export async function addParticipant(
     invite_token: optionalString(data.invite_token),
     bridge_token: optionalString(data.bridge_token),
   };
+}
+
+/**
+ * POST /api/rooms/:id/my-agent — self-service agent provisioning for a logged-in
+ * human participant (docs/API-CONTRACT.md §3). Creates the caller's agent (or
+ * rotates its bridge token if one already exists) and returns the raw bridge
+ * token plus a ready-to-run `join_command` — both shown exactly once. The guest
+ * runs the one command locally to attach their agent, so no token is relayed by
+ * hand.
+ */
+export async function provisionMyAgent(
+  token: string,
+  roomId: string,
+  agentName?: string,
+): Promise<MyAgentResponse> {
+  const body = agentName ? { agent_name: agentName, role: 'agent' } : { role: 'agent' };
+  const data = await request(`/api/rooms/${roomId}/my-agent`, { method: 'POST', token, body });
+  return MyAgentResponseSchema.parse(data);
 }
 
 export interface RotateTokenResult {

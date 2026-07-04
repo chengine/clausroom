@@ -1,4 +1,4 @@
-import { useState, type CSSProperties } from 'react';
+import { useState, type CSSProperties, type ReactNode } from 'react';
 import type { Approval, Participant, Room } from '@clausroom/protocol';
 import { errorText } from '../api.js';
 import { initials } from '../format.js';
@@ -28,6 +28,8 @@ interface SidebarProps {
   onRespondApproval: (approvalId: string, decision: 'approved' | 'denied') => Promise<void>;
   /** Surface an action failure to the human (never swallow pause errors). */
   onActionError: (message: string) => void;
+  /** "Connect your agent" panel, rendered for human participants (null otherwise). */
+  agentPanel?: ReactNode;
 }
 
 export function Sidebar({
@@ -48,6 +50,7 @@ export function Sidebar({
   onSetParticipantPaused,
   onRespondApproval,
   onActionError,
+  agentPanel,
 }: SidebarProps) {
   const [pauseBusy, setPauseBusy] = useState<string | null>(null);
   const [continueBusy, setContinueBusy] = useState(false);
@@ -101,6 +104,8 @@ export function Sidebar({
           onSave={onUpdateSummary}
         />
       )}
+
+      {agentPanel}
 
       <section className="sidebar__section card">
         <h2 className="sidebar__title">Participants</h2>

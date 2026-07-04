@@ -26,6 +26,7 @@ import { mountStatic, resolveWebDist } from './static.js';
 import { authRoutes } from './routes/auth.js';
 import { roomRoutes } from './routes/rooms.js';
 import { participantRoutes } from './routes/participants.js';
+import { myAgentRoutes } from './routes/myAgent.js';
 import { pauseRoutes } from './routes/pause.js';
 import { summaryRoutes } from './routes/summary.js';
 import { messageRoutes } from './routes/messages.js';
@@ -156,6 +157,7 @@ function main(): void {
   app.use('/api', authMiddleware(store, config.sessionTtlDays));
   app.use('/api', roomRoutes(store, config));
   app.use('/api', participantRoutes(store));
+  app.use('/api', myAgentRoutes(store, hub, config));
   app.use('/api', pauseRoutes(store, hub));
   app.use('/api', summaryRoutes(store, hub));
   app.use('/api', messageRoutes(store, hub, config, rateLimiter));

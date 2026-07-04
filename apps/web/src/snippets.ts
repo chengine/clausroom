@@ -45,6 +45,30 @@ export function exportTokenLine(bridgeToken: string): string {
   return `export AGENT_ROOM_BRIDGE_TOKEN="${bridgeToken}"`;
 }
 
+/**
+ * The `claude mcp add` line for an agent connected via the one-command join flow.
+ * Once `clausroom-bridge` is published to npm the bridge is spawned with `npx`
+ * (no repo path to edit), and `clausroom-bridge join <blob>` has already written
+ * ~/.clausroom/bridge.toml and exported AGENT_ROOM_BRIDGE_TOKEN. This registers
+ * the bridge with Claude Code — the equivalent of what `join` prints (§13 step 4).
+ */
+export function claudeMcpAddJoin(): string {
+  return [
+    'claude mcp add --transport stdio clausroom \\',
+    '  --env AGENT_ROOM_BRIDGE_TOKEN=$AGENT_ROOM_BRIDGE_TOKEN \\',
+    '  -- npx -y clausroom-bridge mcp --config ~/.clausroom/bridge.toml',
+  ].join('\n');
+}
+
+/**
+ * The one-link guest join URL: `<serverUrl>/join#i=<invite>`. The invite rides in
+ * the URL fragment (never the query string) so it stays out of server logs and
+ * the Referer header (docs/API-CONTRACT.md §1 "Web join links"). Single-use.
+ */
+export function guestJoinLink(serverUrl: string, inviteToken: string): string {
+  return `${serverUrl.replace(/\/+$/, '')}/join#i=${inviteToken}`;
+}
+
 export function claudeMcpAddCommand(): string {
   // `clausroom-bridge` is a private workspace bin and is never on PATH, so the
   // snippet must spawn the built entry point directly (same form as README.md
@@ -87,12 +111,14 @@ export function humanOnboardingText(input: HumanSnippetInput): string {
   return [
     `You're invited to the clausroom "${input.roomName}".`,
     '',
-    `1. Open ${input.serverUrl}/ in your browser.`,
-    `2. Paste this one-time invite token on the login screen:`,
+    'Open this one-time link — it signs you in and drops you straight into the room:',
     '',
-    `   ${input.inviteToken}`,
+    `   ${guestJoinLink(input.serverUrl, input.inviteToken)}`,
     '',
-    'The token works exactly once and signs you in as yourself.',
+    `If the link doesn't open, go to ${input.serverUrl}/ and paste this token on the`,
+    `sign-in screen instead: ${input.inviteToken}`,
+    '',
+    'The link (and token) work exactly once and sign you in as yourself.',
   ].join('\n');
 }
 

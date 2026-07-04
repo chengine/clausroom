@@ -2387,6 +2387,18 @@ select.input {
   justify-content: flex-end;
 }
 
+/* Inline icon in the "shown once" warning (e.g. Connect-your-agent modal). */
+.modal__warning svg {
+  vertical-align: -2px;
+  margin-right: 4px;
+}
+
+/* Connect-your-agent panel CTA: full-width, centered like the Continue button. */
+.connect-agent__btn {
+  justify-content: center;
+  width: 100%;
+}
+
 .token-box {
   display: flex;
   align-items: center;

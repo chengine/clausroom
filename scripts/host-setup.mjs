@@ -69,6 +69,17 @@ const BOOL_FLAGS = new Set([
 
 const HOST_SESSION_FILE = () => path.join(os.homedir(), '.clausroom', 'host-session.json');
 const TAILSCALE_ADMIN_URL = 'https://login.tailscale.com/admin/machines';
+const TAILSCALE_DNS_URL = 'https://login.tailscale.com/admin/dns';
+
+// WSL -> Windows: the Windows Tailscale CLI is callable from WSL at this path, and
+// (in NAT mode with localhost forwarding) exposing `localhost:<port>` via the
+// Windows exe reaches a WSL server bound to 0.0.0.0.
+const WINDOWS_TAILSCALE_EXE = '/mnt/c/Program Files/Tailscale/tailscale.exe';
+
+// tailscale serve HANGS (never returns) when the tailnet has HTTPS certs disabled;
+// it first prints this to stdout/stderr. We watch for it and fall back instead of
+// hanging. (The `tailscale cert` path 500s with the same class of error.)
+const TS_CERTS_DISABLED_RE = /does not support getting TLS certs/i;
 
 // ---------------------------------------------------------------------------
 // tiny utilities
@@ -417,25 +428,114 @@ function runCmd(cmd, args, { timeoutMs = 10_000 } = {}) {
   });
 }
 
-/** Inspect tailscale: is the CLI present, is the backend running, what DNS name? */
-async function detectTailscale() {
-  const res = await runCmd('tailscale', ['status', '--json']);
-  if (!res.ok) return { available: false, backendRunning: false, dnsName: null };
-  let status;
+/** Quote a command path for display in a copy-pasteable shell line. */
+function shellQuoteCmd(cmd) {
+  return /[\s"']/.test(cmd) ? `"${cmd}"` : cmd;
+}
+
+/**
+ * Probe one tailscale CLI candidate. Returns null when the binary is absent at
+ * this path (ENOENT); otherwise reports whether the backend is Running and the
+ * self DNS name (trailing dot stripped) even if we could not parse status.
+ */
+async function probeTailscaleCli(cmd) {
+  const res = await runCmd(cmd, ['status', '--json']);
+  const notFound = !res.ok && res.code === -1 && /ENOENT|not found|no such file/i.test(res.stderr || '');
+  if (notFound) return null; // binary absent at this path
+  let status = null;
   try {
     status = JSON.parse(res.stdout);
   } catch {
-    return { available: true, backendRunning: false, dnsName: null };
+    /* CLI present but not logged in / not running yet */
   }
-  const backendRunning = status && status.BackendState === 'Running';
+  const backendRunning = Boolean(status && status.BackendState === 'Running');
   const rawName = status && status.Self && status.Self.DNSName ? String(status.Self.DNSName) : '';
   const dnsName = rawName ? rawName.replace(/\.+$/, '') : null; // strip trailing dot(s)
-  return { available: true, backendRunning: Boolean(backendRunning), dnsName };
+  return { backendRunning, dnsName };
 }
 
-/** Background a persistent reverse proxy: tailscale serve --bg --https=443. */
-async function tailscaleServe(port) {
-  return runCmd('tailscale', ['serve', '--bg', '--https=443', `localhost:${port}`], { timeoutMs: 20_000 });
+/**
+ * Locate a usable tailscale CLI and inspect it. Search order (per onboarding v2):
+ *   (a) `tailscale` on PATH (native linux/mac),
+ *   (b) the Windows exe at its known WSL path, then `tailscale.exe` on PATH.
+ * Among the candidates that exist, prefer one whose backend is Running with a DNS
+ * name; otherwise return the first that exists. `windows` marks a Windows-side CLI
+ * driven from WSL (which needs the server bound to 0.0.0.0 to be reachable).
+ */
+async function detectTailscale() {
+  const candidates = [
+    { cmd: 'tailscale', windows: false },
+    { cmd: WINDOWS_TAILSCALE_EXE, windows: true },
+    { cmd: 'tailscale.exe', windows: true },
+  ];
+  const found = [];
+  for (const cand of candidates) {
+    const info = await probeTailscaleCli(cand.cmd);
+    if (info) found.push({ available: true, cmd: cand.cmd, windows: cand.windows, ...info });
+  }
+  if (found.length === 0) {
+    return { available: false, cmd: null, windows: false, backendRunning: false, dnsName: null };
+  }
+  return found.find((f) => f.backendRunning && f.dnsName) || found[0];
+}
+
+/**
+ * Background a persistent reverse proxy: `<cmd> serve --bg --https=443
+ * localhost:<port>`. Returns quickly on success (--bg backgrounds and exits). If
+ * the tailnet has HTTPS certs disabled the command HANGS instead of erroring, so
+ * we stream its output, detect the certs-disabled message, and kill it early
+ * ({ certsDisabled:true }) rather than blocking. A hard timeout is the last resort.
+ */
+function tailscaleServe(cmd, port) {
+  return new Promise((resolve) => {
+    let proc;
+    try {
+      proc = spawn(cmd, ['serve', '--bg', '--https=443', `localhost:${port}`], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (err) {
+      resolve({ ok: false, code: -1, stdout: '', stderr: String(err), certsDisabled: false });
+      return;
+    }
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    const finish = (r) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        proc.kill('SIGKILL'); // no-op if it already backgrounded & exited
+      } catch {
+        /* ignore */
+      }
+      resolve(r);
+    };
+    const certsDisabled = () => TS_CERTS_DISABLED_RE.test(stderr) || TS_CERTS_DISABLED_RE.test(stdout);
+    const checkCerts = () => {
+      if (certsDisabled()) finish({ ok: false, code: -1, stdout, stderr, certsDisabled: true });
+    };
+    const timer = setTimeout(() => {
+      finish({
+        ok: false,
+        code: -1,
+        stdout,
+        stderr: `${stderr}\n[timed out after 25000ms — 'serve' did not return; HTTPS certs may be disabled]`,
+        certsDisabled: certsDisabled(),
+        timedOut: true,
+      });
+    }, 25_000);
+    proc.stdout.on('data', (d) => {
+      stdout += d;
+      checkCerts();
+    });
+    proc.stderr.on('data', (d) => {
+      stderr += d;
+      checkCerts();
+    });
+    proc.on('error', (err) => finish({ ok: false, code: -1, stdout, stderr: String(err), certsDisabled: false }));
+    proc.on('close', (code) => finish({ ok: code === 0, code, stdout, stderr, certsDisabled: certsDisabled() }));
+  });
 }
 
 /** Best-effort open a URL in the default browser. Any failure is a silent no-op. */
@@ -594,6 +694,82 @@ function teacherOnboarding({
   ].join('\n');
 }
 
+/**
+ * Onboarding v2 message for the teacher: ONE guest join link (auto-login) plus a
+ * ONE-command agent attach (`clausroom-bridge join <blob>`) — no relaying URL +
+ * invite + bridge token as three separate secrets. Used by `npm run up`.
+ */
+function teacherOnboardingV2({
+  teacherName,
+  studentName,
+  projectName,
+  guestBase,
+  guestJoinLink,
+  joinCommand,
+  reachable,
+}) {
+  const healthz = `${guestBase.replace(/\/$/, '')}/healthz`;
+  const lines = [
+    '========================================================================',
+    'TEACHER ONBOARDING  —  send this over a channel you trust',
+    '========================================================================',
+    '',
+    `Hi ${teacherName},`,
+    '',
+    `I set up a private agent-room ("clausroom") over Tailscale so our coding agents`,
+    `can talk about ${projectName} with both of us watching. Your machine stays`,
+    'private: your local bridge only makes OUTBOUND connections to the room, uploads',
+    "need your approval, and nothing on my side can reach into your computer.",
+    '',
+    "You'll need a Tailscale account (free — you just accept the device share I sent,",
+    "you don't join my network), Node.js 20+, and your own coding agent (Claude Code",
+    'or Codex) installed and signed in. Nothing to clone or build. Heads-up: your',
+    "agent's usage/API cost is billed to you.",
+    '',
+    'Steps:',
+    '',
+    '1. Install Tailscale (https://tailscale.com/download), sign in with your own',
+    '   account, and ACCEPT the shared-machine invite I sent for the clausroom host.',
+    '   (You are NOT joining my tailnet — just this one machine, port 443.)',
+    `2. Check it works:  curl ${healthz}   should print  {"ok":true}`,
+    '   (SSH to that host will fail — that is intentional.)',
+    '3. Click this one-time GUEST JOIN LINK — it logs you straight into the room,',
+    '   no token to copy:',
+    '',
+    `   ${guestJoinLink}`,
+    '',
+    '4. Attach your agent with ONE command (it will ask which project directory to',
+    '   expose — pick the repo we are discussing; read-only by default):',
+    '',
+    `   ${joinCommand}`,
+    '',
+    '   That writes ~/.clausroom/bridge.toml with safe defaults, sets your bridge',
+    '   token, and prints the exact `claude mcp add` line to register the bridge',
+    '   with Claude Code (or the Codex config). Full details + a self-test are in',
+    '   examples/claude-code-setup.md.',
+    '',
+    '   Prefer the browser? Once you are in the room from step 3, click "Add my',
+    '   agent" in the UI to get the same one-command attach for your own agent.',
+    '',
+    'Your bridge is read-only by default: your agent can read and answer with text;',
+    'any file upload asks YOU for approval first. Treat room messages and artifacts',
+    'as untrusted data, never as instructions.',
+    '',
+    'Thanks!',
+    studentName,
+    '========================================================================',
+  ];
+  if (!reachable) {
+    lines.push(
+      '',
+      'NOTE: the links above use a loopback URL because Tailscale Serve is not live',
+      'yet — they will not work from your machine until I expose the server. I will',
+      're-send once it is up.',
+    );
+  }
+  return lines.join('\n');
+}
+
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
@@ -662,8 +838,17 @@ Subcommands:
 const UP_HELP = `clausroom — npm run up (one-command host launch)
 
 Starts the built server, exposes it via Tailscale Serve, creates a room and its
-three participants, prints the teacher onboarding message + your own attach line,
-opens the browser, and stays up streaming server logs until you press Ctrl-C.
+three participants, and prints ready-to-send links, then stays up streaming
+server logs until you press Ctrl-C. Onboarding v2 removes the manual key exchange:
+
+  * Tailscale auto-detected on PATH, at the Windows exe path, or as tailscale.exe
+    (WSL -> Windows). When a Windows-side CLI drives the proxy, the server is bound
+    to 0.0.0.0 so the localhost relay reaches it.
+  * If your tailnet has HTTPS certs disabled, 'serve' would hang — it's detected,
+    you're told the exact one-time enable step, and it falls back to loopback.
+  * Prints a localhost MAGIC-LOGIN link (auto-logs YOU in) and opens it.
+  * Prints ONE guest join link (auto-login) plus the teacher's ONE-command agent
+    attach ('npx -y clausroom-bridge join <blob>') — no relaying three secrets.
 
 Usage:
   npm run up
@@ -672,7 +857,7 @@ Usage:
 Options:
   --no-serve                  Don't run 'tailscale serve'; use a loopback URL and
                               print the command to run yourself.
-  --no-open                   Don't try to open the browser.
+  --no-open                   Don't try to open the magic-login link in a browser.
   --non-interactive           Never prompt; take names from flags/env or defaults.
   --invite <arit_...>         Login invite to use when no saved session is valid.
                               Normally auto-detected from the server's bootstrap/
@@ -816,7 +1001,28 @@ async function runUp(flags) {
   info('======================');
 
   try {
-    // --- 1/2. start the server (foreground for the life of the command) --
+    // --- 1/2. detect tailscale FIRST (so we can bind the server correctly) --
+    // Do this before spawning the server: when a Windows-side Tailscale drives the
+    // proxy from WSL, `localhost:<port>` only reaches the WSL server if it binds
+    // 0.0.0.0 (NAT + localhost forwarding). We set AGENT_ROOM_HOST accordingly
+    // before startServer, which copies process.env into the child.
+    let ts = { available: false, cmd: null, windows: false, backendRunning: false, dnsName: null };
+    if (!noServe) {
+      info('[host-setup] looking for the Tailscale CLI...');
+      ts = await detectTailscale();
+      if (ts.available && ts.windows && ts.backendRunning) {
+        const host = process.env.AGENT_ROOM_HOST;
+        if (!host || host === '127.0.0.1' || host === 'localhost') {
+          process.env.AGENT_ROOM_HOST = '0.0.0.0';
+          info(
+            '[host-setup] WSL + Windows Tailscale detected; binding the server to ' +
+              '0.0.0.0 so the Windows localhost relay reaches it.',
+          );
+        }
+      }
+    }
+
+    // --- start the server (foreground for the life of the command) -------
     registerCleanup();
     const started = await startServer(); // fails clearly if dist missing / times out
     const serverPort = started.port;
@@ -858,43 +1064,51 @@ async function runUp(flags) {
     }
 
     // --- 4. tailscale serve (unless --no-serve); degrade gracefully ------
-    const manualServeLine = `tailscale serve --bg --https=443 localhost:${serverPort}`;
-    let roomUrl;
+    const loopbackUrl = `http://127.0.0.1:${serverPort}/`;
+    const manualServeLine = `${shellQuoteCmd(ts.cmd || 'tailscale')} serve --bg --https=443 localhost:${serverPort}`;
+    let roomUrl; // the URL the operator sees (public when served, else loopback)
+    let publicBaseUrl = null; // set only when tailscale serve is actually live
     let servedPublicly = false;
     if (noServe) {
       info('[host-setup] --no-serve: not touching tailscale; using a loopback URL.');
       info('[host-setup] Expose it yourself when ready:');
       info(`[host-setup]     ${manualServeLine}`);
-      roomUrl = `http://127.0.0.1:${serverPort}/`;
-    } else {
-      const ts = await detectTailscale();
-      if (ts.available && ts.backendRunning && ts.dnsName) {
-        info(`[host-setup] tailscale is up; exposing localhost:${serverPort} on :443...`);
-        const res = await tailscaleServe(serverPort);
-        if (res.ok) {
-          roomUrl = `https://${ts.dnsName}/`;
-          servedPublicly = true;
-          info(`[host-setup] tailscale serve is live: ${roomUrl}`);
-        } else {
-          info(
-            `[host-setup] WARNING: 'tailscale serve' failed (exit ${res.code}): ` +
-              `${(res.stderr || '').trim().slice(0, 200)}`,
-          );
-          info('[host-setup] falling back to a loopback URL. Run this yourself when ready:');
-          info(`[host-setup]     ${manualServeLine}`);
-          roomUrl = `http://127.0.0.1:${serverPort}/`;
-        }
+      roomUrl = loopbackUrl;
+    } else if (ts.available && ts.backendRunning && ts.dnsName) {
+      info(`[host-setup] tailscale is up (${shellQuoteCmd(ts.cmd)}); exposing localhost:${serverPort} on :443...`);
+      const res = await tailscaleServe(ts.cmd, serverPort);
+      if (res.ok) {
+        publicBaseUrl = `https://${ts.dnsName}`;
+        roomUrl = `${publicBaseUrl}/`;
+        servedPublicly = true;
+        info(`[host-setup] tailscale serve is live: ${roomUrl}`);
+      } else if (res.certsDisabled) {
+        info('[host-setup] WARNING: your tailnet has HTTPS certificates DISABLED, so');
+        info("[host-setup] 'tailscale serve --https=443' cannot get a TLS cert (it would hang).");
+        info('[host-setup] ENABLE it once (takes ~10 s), then re-run `npm run up`:');
+        info(`[host-setup]     1. Open ${TAILSCALE_DNS_URL}`);
+        info('[host-setup]     2. Under "HTTPS Certificates", click Enable.');
+        info('[host-setup] Falling back to a loopback URL for now.');
+        roomUrl = loopbackUrl;
       } else {
-        const why = !ts.available
-          ? 'tailscale CLI not found'
-          : !ts.backendRunning
-            ? 'tailscale is installed but not logged in / not running'
-            : "could not read this machine's Tailscale DNS name";
-        info(`[host-setup] WARNING: ${why}; skipping automatic exposure.`);
-        info('[host-setup] falling back to a loopback URL. Run this yourself once tailscale is ready:');
+        info(
+          `[host-setup] WARNING: 'tailscale serve' did not succeed (exit ${res.code}): ` +
+            `${(res.stderr || '').trim().slice(0, 200)}`,
+        );
+        info('[host-setup] falling back to a loopback URL. Run this yourself when ready:');
         info(`[host-setup]     ${manualServeLine}`);
-        roomUrl = `http://127.0.0.1:${serverPort}/`;
+        roomUrl = loopbackUrl;
       }
+    } else {
+      const why = !ts.available
+        ? 'tailscale CLI not found (looked for `tailscale`, the Windows exe, and `tailscale.exe`)'
+        : !ts.backendRunning
+          ? 'tailscale is installed but not logged in / not running'
+          : "could not read this machine's Tailscale DNS name";
+      info(`[host-setup] WARNING: ${why}; skipping automatic exposure.`);
+      info('[host-setup] falling back to a loopback URL. Run this yourself once tailscale is ready:');
+      info(`[host-setup]     ${manualServeLine}`);
+      roomUrl = loopbackUrl;
     }
 
     // --- 5. room name + participant display names ------------------------
@@ -937,7 +1151,29 @@ async function runUp(flags) {
 
     if (rl) rl.close();
 
-    // --- 6. emit artifacts to stdout ------------------------------------
+    // --- 6. build links + the one-command guest attach -------------------
+    // Magic host login: a localhost-only link that logs YOU in (no token hunting).
+    const magicLoginUrl = `http://127.0.0.1:${serverPort}/join#s=${sessionToken}`;
+
+    // The base URL the teacher will actually reach: the public Tailscale URL when
+    // serve is live, else loopback (won't work for them until exposed — flagged).
+    const guestBase = (publicBaseUrl || `http://127.0.0.1:${serverPort}`).replace(/\/+$/, '');
+    const guestJoinLink = `${guestBase}/join#i=${teacherInvite}`;
+
+    // The teacher's agent attaches with ONE command; the blob carries connection
+    // info + the teacher's OWN bridge token only (never local config — §13). Encode
+    // ONLY via @clausroom/protocol; dynamic import keeps --help working unbuilt.
+    const { encodeJoinBlob } = await import('@clausroom/protocol');
+    const teacherJoinBlob = encodeJoinBlob({
+      v: 1,
+      server_url: guestBase,
+      room_id: room.id,
+      token: teacherBridgeToken,
+      agent_name: teacherAgentName,
+    });
+    const teacherJoinCommand = `npx -y clausroom-bridge join ${teacherJoinBlob}`;
+
+    // --- emit artifacts to stdout ---------------------------------------
     const studentServerUrl = `http://127.0.0.1:${serverPort}`;
     const bridgeToml = studentBridgeToml({
       humanName: studentName,
@@ -956,18 +1192,29 @@ async function runUp(flags) {
     out('');
     out(`Room URL: ${roomUrl}`);
     out('');
+    out('# YOU (host) — click this magic link to log in automatically (localhost only):');
+    out(magicLoginUrl);
+    out('');
+    out('########################################################################');
+    out('# SEND THE TEACHER ONE LINK  (no more relaying URL + invite + token by hand)');
+    out('########################################################################');
+    out('');
+    out('# Guest join link (auto-login — single-use, treat as a secret):');
+    out(guestJoinLink);
+    out('');
+    out("# The teacher's agent attaches with this ONE command (writes bridge.toml with");
+    out('# safe local defaults; the teacher picks their own project directory):');
+    out(teacherJoinCommand);
+    out('');
     out(
-      teacherOnboarding({
+      teacherOnboardingV2({
         teacherName,
         studentName,
         projectName,
-        roomUrl,
-        inviteToken: teacherInvite,
-        bridgeToken: teacherBridgeToken,
-        roomId: room.id,
-        repoUrl,
-        tokenEnv,
-        configPath,
+        guestBase,
+        guestJoinLink,
+        joinCommand: teacherJoinCommand,
+        reachable: servedPublicly,
       }),
     );
     out('');
@@ -1001,17 +1248,19 @@ async function runUp(flags) {
 
     // --- reminders (stderr) ---------------------------------------------
     info('');
-    info('[host-setup] REMINDER: every token above is shown exactly ONCE — the server');
-    info('[host-setup] stores only SHA-256 hashes. Copy them now.');
+    info('[host-setup] REMINDER: every token/link above is shown exactly ONCE — the');
+    info('[host-setup] server stores only SHA-256 hashes. Copy them now.');
     if (!servedPublicly && !noServe) {
-      info('[host-setup] NOTE: tailscale serve did not run, so the URL above is loopback-only.');
-      info(`[host-setup]       Expose it later with:  ${manualServeLine}`);
+      info('[host-setup] NOTE: tailscale serve did not run, so the URLs above are');
+      info('[host-setup]       loopback-only — the guest link/command will not reach the');
+      info(`[host-setup]       teacher until you expose it:  ${manualServeLine}`);
+      info('[host-setup]       Re-run `npm run up` afterwards to reprint working links.');
     }
 
-    // --- 7. open the browser (best-effort; failures are silent) ----------
+    // --- 7. open the browser to the MAGIC LOGIN link (auto-login) --------
     if (!noOpen) {
-      const opened = await openBrowser(roomUrl);
-      if (opened) info(`[host-setup] opened ${roomUrl} in your browser.`);
+      const opened = await openBrowser(magicLoginUrl);
+      if (opened) info('[host-setup] opened the magic-login link in your browser (auto-logged in).');
     }
 
     // --- 8. readiness sentinel, then stay up in the foreground ----------
