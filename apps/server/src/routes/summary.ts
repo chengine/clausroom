@@ -13,10 +13,11 @@ import { getAuth, getRoomCtx, roomGuard } from '../auth.js';
 import { nowIso, toRoom, type Store } from '../db.js';
 import { redactSecrets } from '../policy.js';
 import { createAndBroadcastMessage } from '../messageService.js';
+import type { ServerConfig } from '../env.js';
 import type { WsHub } from '../ws.js';
 import { h, parse } from './util.js';
 
-export function summaryRoutes(store: Store, hub: WsHub): Router {
+export function summaryRoutes(store: Store, hub: WsHub, config: ServerConfig): Router {
   const router = Router();
 
   router.put(
@@ -40,7 +41,7 @@ export function summaryRoutes(store: Store, hub: WsHub): Router {
       store.updateRoomSummary(room.id, summaryMarkdown, auth.user.id, nowIso());
       const updated = store.getRoom(room.id);
       if (!updated) throw notFound('Room not found.');
-      const roomOut = toRoom(updated);
+      const roomOut = toRoom(updated, config);
 
       // Side effects in binding order: room_updated broadcast, then a
       // system_event message from the System user (broadcast + MSG logged).

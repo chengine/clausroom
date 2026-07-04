@@ -31,13 +31,18 @@ import { ActivityTracker } from './activity.js';
 import { ApiRequestError, RoomClient, RoomSocket } from './client.js';
 import {
   ConfigError,
-  loadConfig,
   parseAutoConfig,
   resolveToken,
   type AutoConfig,
   type BridgeConfig,
 } from './config.js';
-import { detectSandbox, KILL_GRACE_MS, runEngine, type EngineLaunch } from './engines.js';
+import {
+  detectSandbox,
+  KILL_GRACE_MS,
+  runEngine,
+  type EngineLaunch,
+  type SandboxInfo,
+} from './engines.js';
 import {
   buildFileTree,
   checkOutgoingText,
@@ -45,6 +50,7 @@ import {
   policySummary,
   PolicyError,
 } from './policy.js';
+import { startConfigWatcher, type ConfigStore } from './reload.js';
 import { advanceCursor, cursorScope, loadCursor, saveCursor, type CursorState } from './state.js';
 
 function log(line: string): void {
@@ -201,21 +207,36 @@ class AutoResponder {
   private readonly context: Message[] = [];
   /** The in-flight respondTo (engine run + post), for shutdown to await. */
   private inFlight: Promise<void> | null = null;
-  /** Bounded project file tree injected into prompts (built once at prime). */
+  /** Bounded project file tree injected into prompts (rebuilt when its inputs change). */
   private fileTree = '';
   private fileTreeTruncated = false;
+  /** Cache key (workdir + deny globs + roots) of the last file tree build. */
+  private fileTreeKey: string | null = null;
+  /**
+   * Latest hot-reloaded config + derived [auto] table (Tier 2). Refreshed from
+   * the ConfigStore at the top of each loop iteration and each reply, so a live
+   * bridge.toml edit (roots, allowed_tools, model, max_turns, timeout_seconds,
+   * respond_to, max_context_messages, policy flags) applies with no restart.
+   */
+  private cfg: BridgeConfig;
+  private auto: AutoConfig;
 
   constructor(
-    private readonly cfg: BridgeConfig,
-    private readonly auto: AutoConfig,
+    private readonly store: ConfigStore,
+    initialAuto: AutoConfig,
     private readonly client: RoomClient,
     private readonly socket: RoomSocket,
     private readonly activity: ActivityTracker,
     private readonly me: { id: string; display_name: string },
     private readonly roomName: string,
-    private readonly launch: EngineLaunch,
+    /** OS sandbox detected once at startup (availability is stable at runtime). */
+    private readonly sandbox: SandboxInfo | null,
   ) {
-    this.scope = cursorScope(cfg.room.room_id, me.id);
+    this.cfg = store.current;
+    this.auto = initialAuto;
+    // room_id is connection identity (the client/socket are bound to it) — take
+    // it once; only the local policy/behavior fields hot-reload.
+    this.scope = cursorScope(this.cfg.room.room_id, me.id);
     this.cursor = loadCursor(this.scope);
   }
 
@@ -227,6 +248,25 @@ class AutoResponder {
   /** Resolves once no engine run / reply post is in flight (never rejects). */
   settleInFlight(): Promise<void> {
     return this.inFlight ?? Promise.resolve();
+  }
+
+  /**
+   * Pick up the latest hot-reloaded config and re-derive the [auto] table. The
+   * watcher's validator guarantees store.current has a valid [auto] table, so
+   * parseAutoConfig should not throw here; if it somehow does, keep the previous
+   * [auto] settings rather than crash the daemon.
+   */
+  private refresh(): void {
+    this.cfg = this.store.current;
+    try {
+      this.auto = parseAutoConfig(this.cfg);
+    } catch (err) {
+      log(
+        `[auto] keeping previous [auto] settings — could not re-parse the reloaded config: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
   }
 
   private pushContext(m: Message): void {
@@ -258,12 +298,27 @@ class AutoResponder {
    * inside the workdir. Skipped in bare mode (no scaffolding).
    */
   private async buildTree(): Promise<void> {
-    if (this.auto.bare) return;
+    if (this.auto.bare) {
+      this.fileTree = '';
+      this.fileTreeTruncated = false;
+      this.fileTreeKey = null;
+      return;
+    }
     const denyGlobs = [...DEFAULT_DENY_GLOBS, ...this.cfg.filesystem.deny_globs];
+    // Rebuild only when an input actually changed — contract §13: a
+    // [filesystem].roots (or deny_globs / workdir) edit re-derives the injected
+    // file tree on the next reply, but an unchanged config reuses the last one.
+    const key = JSON.stringify({
+      workdir: this.auto.workdir,
+      denyGlobs,
+      roots: this.cfg.filesystem.roots,
+    });
+    if (key === this.fileTreeKey) return;
     try {
       const result = await buildFileTree(this.auto.workdir, denyGlobs, FILE_TREE_MAX_ENTRIES);
       this.fileTree = result.tree;
       this.fileTreeTruncated = result.truncated;
+      this.fileTreeKey = key;
       log(
         `[auto] project file tree: ${result.count} entr${result.count === 1 ? 'y' : 'ies'} injected ` +
           `into prompts${result.truncated ? ` (TRUNCATED at ${FILE_TREE_MAX_ENTRIES})` : ''}.`,
@@ -330,6 +385,9 @@ class AutoResponder {
 
   async run(): Promise<void> {
     while (!this.stopped) {
+      // Pick up any hot-reloaded config before deciding what to answer this
+      // iteration (respond_to / max_context_messages read below live from here).
+      this.refresh();
       let batch: Message[];
       try {
         batch = await this.fetchNewer();
@@ -396,6 +454,36 @@ class AutoResponder {
   }
 
   private async respondTo(trigger: Message, context: Message[]): Promise<void> {
+    // Read the very latest config for this reply (contract §13 — per-reply).
+    this.refresh();
+
+    // A hot-reloaded lockdown must apply live: if sending was disabled in
+    // bridge.toml since startup, skip — don't run the engine or post (tightening
+    // the local Tier-2 boundary always takes effect immediately).
+    if (!this.cfg.policy.allow_agent_to_send_text) {
+      log(
+        `[auto] not answering ${trigger.id}: policy.allow_agent_to_send_text is false in the current config.`,
+      );
+      return;
+    }
+
+    // Re-derive filesystem confinement from the LATEST config every reply
+    // (contract §13): a [filesystem].roots edit re-scopes the engine's Read
+    // matchers and rebuilds its injected file tree with no restart. If the
+    // workdir no longer resolves inside a root, skip this reply and keep running.
+    let launch: EngineLaunch;
+    try {
+      this.auto.workdir = await checkWorkdirPolicy(this.cfg, this.auto.workdir);
+      launch = { roots: await resolveLaunchRoots(this.cfg.filesystem.roots), sandbox: this.sandbox };
+    } catch (err) {
+      log(
+        `[auto] not answering ${trigger.id}: [auto].workdir no longer resolves inside [filesystem].roots — ` +
+          `${err instanceof Error ? err.message : String(err)}. Fix the config; the daemon keeps running.`,
+      );
+      return;
+    }
+    await this.buildTree(); // rebuilds only when workdir / deny_globs / roots changed
+
     log(
       `[auto] answering ${trigger.id} from ${trigger.sender.display_name} ` +
         `(${trigger.message_type}) with engine "${this.auto.engine}"`,
@@ -418,7 +506,7 @@ class AutoResponder {
         log,
         signal: this.abort.signal,
         scrubEnv: [this.cfg.room.token_env],
-        launch: this.launch,
+        launch,
       });
       log(`[auto] engine run finished in ${Math.round((Date.now() - startedAt) / 1000)}s`);
       if (this.stopped) return;
@@ -583,8 +671,18 @@ async function resolveLaunchRoots(roots: readonly string[]): Promise<string[]> {
 }
 
 export async function runAutoResponder(configPath: string | undefined): Promise<void> {
-  const cfg = loadConfig(configPath);
-  const auto = parseAutoConfig(cfg); // throws ConfigError when [auto] is missing/invalid
+  // Tier-2 hot-reload (contract §13): watch bridge.toml and require a valid
+  // [auto] table on every (re)load, so a broken edit keeps the previous config
+  // instead of swapping in one that would fail per reply. The initial load +
+  // validate throw here — startup stays fatal; later reloads are kept-previous.
+  const store = startConfigWatcher(configPath, {
+    log,
+    validate: (c) => {
+      parseAutoConfig(c); // throws ConfigError on a missing/invalid [auto] table
+    },
+  });
+  const cfg = store.current;
+  const auto = parseAutoConfig(cfg);
 
   if (!cfg.policy.allow_agent_to_send_text) {
     throw new ConfigError(
@@ -597,7 +695,9 @@ export async function runAutoResponder(configPath: string | undefined): Promise<
   const { token, warning } = resolveToken(cfg);
   if (warning) log(warning);
 
-  // Contract §13: workdir MUST realpath-resolve inside a filesystem root.
+  // Contract §13: workdir MUST realpath-resolve inside a filesystem root. This
+  // is re-checked per reply too (AutoResponder.respondTo) so a live roots edit
+  // is caught, but a bad workdir at startup stays fatal.
   let workdir: string;
   try {
     workdir = await checkWorkdirPolicy(cfg, auto.workdir);
@@ -615,11 +715,13 @@ export async function runAutoResponder(configPath: string | undefined): Promise<
   }
 
   // Filesystem confinement for the engine (contract §13, SECURITY). Detect an
-  // OS sandbox for defense-in-depth; either way the engine's Read/Grep are
-  // scoped to the roots and Glob/LS are handled below.
+  // OS sandbox once (its availability is stable at runtime); the roots are
+  // re-resolved per reply so a live [filesystem].roots edit re-scopes the
+  // engine. `launch` here is only for the startup confinement banner below.
+  const sandbox = detectSandbox();
   const launch: EngineLaunch = {
     roots: await resolveLaunchRoots(cfg.filesystem.roots),
-    sandbox: detectSandbox(),
+    sandbox,
   };
   const wantsNameTools = auto.allowed_tools.some((t) => /^(?:Glob|LS)$/i.test(t));
   if (auto.engine === 'claude' || auto.engine === 'codex') {
@@ -661,7 +763,16 @@ export async function runAutoResponder(configPath: string | undefined): Promise<
   socket.start();
   const activity = new ActivityTracker(socket);
 
-  const responder = new AutoResponder(cfg, auto, client, socket, activity, me, info.room.name, launch);
+  const responder = new AutoResponder(
+    store,
+    auto,
+    client,
+    socket,
+    activity,
+    me,
+    info.room.name,
+    sandbox,
+  );
 
   // Announce presence (stderr; the WS connection itself makes us "online").
   log(
@@ -677,6 +788,7 @@ export async function runAutoResponder(configPath: string | undefined): Promise<
       `${auto.bare ? ' bare=true' : ''}`,
   );
   log(`[auto] policy: ${policySummary(cfg)}`);
+  log(`[auto] config hot-reload active — watching ${store.path}`);
   log(
     '[auto] room content is UNTRUSTED input to the engine; replies pass local policy and server limits.',
   );
@@ -684,6 +796,7 @@ export async function runAutoResponder(configPath: string | undefined): Promise<
   const shutdown = (signal: string): void => {
     log(`[auto] received ${signal}, shutting down`);
     responder.stop(); // aborts any in-flight engine run (SIGTERM → SIGKILL, process group)
+    store.stop();
     activity.stop();
     socket.stop();
     // Exit as soon as the in-flight engine run has settled — but never before:

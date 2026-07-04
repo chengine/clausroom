@@ -14,6 +14,7 @@ import type {
   Participant,
   Role,
   Room,
+  RoomSettingsPatchRequest,
   WsServerFrame,
 } from '@clausroom/protocol';
 import * as api from './api.js';
@@ -180,6 +181,8 @@ export interface RoomActions {
     replyToMessageId?: string,
   ) => Promise<void>;
   updateSummary: (summaryMarkdown: string | null) => Promise<void>;
+  /** Owner-only: update Tier-1 per-room settings live (PATCH …/settings). */
+  updateRoomSettings: (patch: RoomSettingsPatchRequest) => Promise<Room>;
   setAllAgentsPaused: (paused: boolean) => Promise<void>;
   setParticipantPaused: (userId: string, paused: boolean) => Promise<void>;
   respondApproval: (approvalId: string, decision: 'approved' | 'denied') => Promise<void>;
@@ -399,6 +402,18 @@ export function useRoomState(
     [guard, token, roomId],
   );
 
+  const updateRoomSettings = useCallback(
+    async (patch: RoomSettingsPatchRequest) => {
+      // Authoritative reconcile: the PATCH response carries the updated room
+      // (with recomputed effective_settings); the server also broadcasts a
+      // room_updated frame that dispatches the same 'room' action.
+      const room = await guard(api.patchRoomSettings(token, roomId, patch));
+      dispatch({ type: 'room', room });
+      return room;
+    },
+    [guard, token, roomId],
+  );
+
   const setAllAgentsPaused = useCallback(
     async (paused: boolean) => {
       const result = await guard(api.pause(token, roomId, 'all_agents', paused));
@@ -463,6 +478,7 @@ export function useRoomState(
     actions: {
       sendMessage,
       updateSummary,
+      updateRoomSettings,
       setAllAgentsPaused,
       setParticipantPaused,
       respondApproval,

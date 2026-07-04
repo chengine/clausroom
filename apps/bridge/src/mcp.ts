@@ -25,7 +25,8 @@ import {
 } from '@clausroom/protocol';
 import { ActivityTracker } from './activity.js';
 import { ApiRequestError, RoomClient, RoomSocket } from './client.js';
-import { loadConfig, resolveToken, type BridgeConfig } from './config.js';
+import { resolveToken } from './config.js';
+import { startConfigWatcher, type ConfigStore } from './reload.js';
 import { checkOutgoingText, checkUploadPolicy, policySummary, PolicyError } from './policy.js';
 import { advanceCursor, cursorScope, loadCursor, resolveDownloadsDir, saveCursor } from './state.js';
 
@@ -139,7 +140,14 @@ const TOOL_NAMES = [
 ] as const;
 
 interface BridgeRuntime {
-  cfg: BridgeConfig;
+  /**
+   * Hot-reloadable local config (Tier 2). Tool bodies read `store.current` PER
+   * CALL so a live bridge.toml edit (policy flags, roots, deny_globs, upload
+   * thresholds) applies without restarting the MCP server.
+   */
+  store: ConfigStore;
+  /** Frozen at startup: the client/socket/cursor are bound to this room. */
+  roomId: string;
   client: RoomClient;
   socket: RoomSocket;
   me: User;
@@ -156,7 +164,7 @@ function addressedToMe(m: Message, myId: string): boolean {
  * cursor (message deleted / server reset) by resetting it once.
  */
 async function fetchPendingMessages(rt: BridgeRuntime): Promise<Message[]> {
-  const scope = cursorScope(rt.cfg.room.room_id, rt.me.id);
+  const scope = cursorScope(rt.roomId, rt.me.id);
   const cursor = loadCursor(scope);
   let messages: Message[];
   try {
@@ -184,8 +192,8 @@ async function fetchPendingMessages(rt: BridgeRuntime): Promise<Message[]> {
 // ---------------------------------------------------------------------------
 
 function registerTools(server: McpServer, rt: BridgeRuntime): void {
-  const { cfg, client, socket, activity } = rt;
-  const roomId = cfg.room.room_id;
+  const { store, client, socket, activity } = rt;
+  const roomId = rt.roomId;
 
   /**
    * Standard wrapper for every tool body: activity signaling (a `working`
@@ -210,6 +218,7 @@ function registerTools(server: McpServer, rt: BridgeRuntime): void {
     },
     async () =>
       tracked(async () => {
+        const cfg = store.current; // hot-reloaded config, read per call
         const info = await client.getRoom();
         const approvals = (await client.listApprovals('pending')).filter(
           (a) => a.requested_by === rt.me.id && a.status === 'pending',
@@ -374,6 +383,7 @@ function registerTools(server: McpServer, rt: BridgeRuntime): void {
       choices,
     }) =>
       tracked(async () => {
+        const cfg = store.current; // hot-reloaded config, read per call
         if (!cfg.policy.allow_agent_to_send_text) {
           return textResult(
             'Refused by local bridge policy: allow_agent_to_send_text is false in bridge.toml. ' +
@@ -553,6 +563,7 @@ function registerTools(server: McpServer, rt: BridgeRuntime): void {
     },
     async ({ path: inputPath, description, approval_id }) =>
       tracked(async () => {
+        const cfg = store.current; // hot-reloaded config, read per call
         const check = await checkUploadPolicy(cfg, inputPath); // throws PolicyError on hard refusal
 
         if (check.requiresApproval) {
@@ -681,6 +692,7 @@ function registerTools(server: McpServer, rt: BridgeRuntime): void {
     },
     async ({ artifact_id, filename }) =>
       tracked(async () => {
+        const cfg = store.current; // hot-reloaded config, read per call
         const artifact = await client.getArtifact(artifact_id);
         if (artifact.size_bytes > DEFAULTS.MAX_UPLOAD_BYTES) {
           return textResult(
@@ -785,6 +797,7 @@ function registerTools(server: McpServer, rt: BridgeRuntime): void {
     },
     async ({ message_id, summary }) =>
       tracked(async () => {
+        const cfg = store.current; // hot-reloaded config, read per call
         if (!cfg.policy.allow_agent_to_send_text) {
           return textResult(
             'Refused by local bridge policy: allow_agent_to_send_text is false in bridge.toml.',
@@ -853,6 +866,7 @@ function registerTools(server: McpServer, rt: BridgeRuntime): void {
     },
     async ({ summary_markdown }) =>
       tracked(async () => {
+        const cfg = store.current; // hot-reloaded config, read per call
         if (!cfg.policy.allow_agent_to_send_text) {
           return textResult(
             'Refused by local bridge policy: allow_agent_to_send_text is false in bridge.toml. ' +
@@ -891,10 +905,16 @@ function registerTools(server: McpServer, rt: BridgeRuntime): void {
 // ---------------------------------------------------------------------------
 
 export async function runMcpServer(configPath: string | undefined): Promise<void> {
-  const cfg = loadConfig(configPath);
+  // Tier-2 hot-reload: the config file is watched; tool bodies read
+  // store.current per call so a live bridge.toml edit applies with no restart.
+  // A broken [auto] table must never disturb the MCP server, so no validator.
+  const store = startConfigWatcher(configPath, { log });
+  const cfg = store.current;
   const { token, warning } = resolveToken(cfg);
   if (warning) log(warning);
 
+  // Connection identity is bound ONCE here (you cannot move a live socket/token
+  // to another room); only the local policy boundary hot-reloads.
   const client = new RoomClient(cfg.room.server_url, cfg.room.room_id, token);
 
   // Fail fast, with readable stderr output, if the server/room/token is wrong.
@@ -907,7 +927,7 @@ export async function runMcpServer(configPath: string | undefined): Promise<void
   // Automatic working/idle status frames around tool executions (contract §12).
   const activity = new ActivityTracker(socket);
 
-  const rt: BridgeRuntime = { cfg, client, socket, me, activity };
+  const rt: BridgeRuntime = { store, roomId: cfg.room.room_id, client, socket, me, activity };
 
   // Human-readable stderr notices for my own approval lifecycle events.
   socket.onFrame((frame) => {
@@ -935,9 +955,11 @@ export async function runMcpServer(configPath: string | undefined): Promise<void
   );
   log(`registered tools: ${TOOL_NAMES.join(', ')}`);
   log(`policy: ${policySummary(cfg)}`);
+  log(`config hot-reload active — watching ${store.path}`);
 
   const shutdown = (signal: string): void => {
     log(`received ${signal}, shutting down`);
+    store.stop();
     activity.stop();
     socket.stop();
     void server

@@ -18,7 +18,14 @@ import { z } from 'zod';
 import { DEFAULTS, genId } from '@clausroom/protocol';
 import { HttpError, notFound, tooLarge, validation } from '../errors.js';
 import { getAuth, getRoomCtx, roomGuard } from '../auth.js';
-import { nowIso, toArtifact, type ApprovalRow, type ArtifactRow, type Store } from '../db.js';
+import {
+  effectiveRoomSettings,
+  nowIso,
+  toArtifact,
+  type ApprovalRow,
+  type ArtifactRow,
+  type Store,
+} from '../db.js';
 import { isArchive, matchesSecretNameGlob, redactSecrets, sanitizeFilename } from '../policy.js';
 import { createMessage, publishMessage } from '../messageService.js';
 import { withLazyExpiry } from './approvals.js';
@@ -185,15 +192,20 @@ export function artifactRoutes(store: Store, hub: WsHub, config: ServerConfig): 
         const storagePath = path.join(destDir, `${sha256}__${sanitized}`);
         fs.renameSync(file.path, storagePath);
 
+        // Effective Tier-1 settings for THIS room, read per-request (room
+        // override ?? global default) so a live PATCH applies with no restart.
+        const settings = effectiveRoomSettings(room, config);
+
         const createdAt = nowIso();
         // Retention (docs/API-CONTRACT.md §5): expires_at = created_at +
-        // retention days (0 = immediate expiry); null when retention is
-        // disabled ('off' or negative) — the artifact never expires.
+        // effective retention days (0 = immediate expiry); null when retention is
+        // disabled (global default 'off'/negative and no room override) — the
+        // artifact never expires.
         const expiresAt =
-          config.artifactRetentionDays === null
+          settings.retention_days === null
             ? null
             : new Date(
-                Date.parse(createdAt) + config.artifactRetentionDays * DAY_MS,
+                Date.parse(createdAt) + settings.retention_days * DAY_MS,
               ).toISOString();
         const row: ArtifactRow = {
           id: artifactId,
@@ -221,7 +233,8 @@ export function artifactRoutes(store: Store, hub: WsHub, config: ServerConfig): 
             // Sum of non-deleted artifact bytes, computed inside the insert
             // transaction so concurrent uploads cannot both squeeze under.
             const used = store.sumActiveArtifactBytes(room.id);
-            if (used + sizeBytes > config.roomStorageBytes) {
+            // Effective per-room quota, read per-request (override ?? global).
+            if (used + sizeBytes > settings.storage_bytes) {
               throw new HttpError(413, 'quota_exceeded', QUOTA_EXCEEDED_MESSAGE);
             }
             store.insertArtifact(row);

@@ -12,9 +12,10 @@ import {
 import { unauthorized } from '../errors.js';
 import { authMiddleware, getAuth } from '../auth.js';
 import { nowIso, toRoom, toUser, type Store } from '../db.js';
+import type { ServerConfig } from '../env.js';
 import { h, parse } from './util.js';
 
-export function authRoutes(store: Store, sessionTtlDays: number): Router {
+export function authRoutes(store: Store, config: ServerConfig): Router {
   const router = Router();
 
   // No Authorization header required.
@@ -52,13 +53,13 @@ export function authRoutes(store: Store, sessionTtlDays: number): Router {
 
   router.get(
     '/me',
-    authMiddleware(store, sessionTtlDays),
+    authMiddleware(store, config.sessionTtlDays),
     h(async (req, res) => {
       const auth = getAuth(req);
       const rooms = store.listRoomsForUser(auth.user.id);
       res.status(200).json({
         user: toUser(auth.user),
-        rooms: rooms.map(({ room, role }) => ({ room: toRoom(room), my_role: role })),
+        rooms: rooms.map(({ room, role }) => ({ room: toRoom(room, config), my_role: role })),
       });
     }),
   );

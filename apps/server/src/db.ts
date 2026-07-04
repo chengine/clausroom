@@ -13,9 +13,11 @@ import type {
   Participant,
   Role,
   Room,
+  RoomEffectiveSettings,
   User,
   UserKind,
 } from '@clausroom/protocol';
+import type { ServerConfig } from './env.js';
 
 /** ISO-8601 UTC timestamp with milliseconds. */
 export function nowIso(): string {
@@ -61,6 +63,15 @@ export interface RoomRow {
   summary_markdown: string | null;
   summary_updated_by: string | null;
   summary_updated_at: string | null;
+  /**
+   * Tier-1 per-room setting OVERRIDES (docs/API-CONTRACT.md §3). NULL means
+   * "fall back to the server global env default" for that setting; a number
+   * pins the override for this room. Resolved per-request via
+   * effectiveRoomSettings() — never cached, so PATCH takes effect with no restart.
+   */
+  max_auto_turns: number | null;
+  retention_days: number | null;
+  storage_bytes: number | null;
 }
 
 export interface ParticipantRow {
@@ -152,7 +163,23 @@ export function toUser(row: UserRow): User {
   };
 }
 
-export function toRoom(row: RoomRow): Room {
+/**
+ * Resolve the room's effective Tier-1 settings as `room override ?? global env
+ * default`, computed fresh (never cached) so a live PATCH is honored per-request
+ * with no restart (docs/API-CONTRACT.md §3). `??` (not `||`) means an override of
+ * `0` (immediate-expiry retention) is respected rather than falling through.
+ * `retention_days` is `number | null`: an override can only be a finite `>= 0`
+ * value, so `null` here means the global default disables retention entirely.
+ */
+export function effectiveRoomSettings(row: RoomRow, config: ServerConfig): RoomEffectiveSettings {
+  return {
+    max_auto_turns: row.max_auto_turns ?? config.maxAutoTurns,
+    retention_days: row.retention_days ?? config.artifactRetentionDays,
+    storage_bytes: row.storage_bytes ?? config.roomStorageBytes,
+  };
+}
+
+export function toRoom(row: RoomRow, config: ServerConfig): Room {
   return {
     id: row.id,
     name: row.name,
@@ -163,6 +190,10 @@ export function toRoom(row: RoomRow): Room {
     summary_markdown: row.summary_markdown,
     summary_updated_by: row.summary_updated_by,
     summary_updated_at: row.summary_updated_at,
+    max_auto_turns: row.max_auto_turns,
+    retention_days: row.retention_days,
+    storage_bytes: row.storage_bytes,
+    effective_settings: effectiveRoomSettings(row, config),
   };
 }
 
@@ -384,6 +415,11 @@ export class Store {
     this.addColumnIfMissing('rooms', 'summary_updated_at', 'TEXT');
     this.addColumnIfMissing('messages', 'choices_json', 'TEXT');
     this.addColumnIfMissing('artifacts', 'deleted_at', 'TEXT');
+    // Tier-1 per-room setting overrides (docs/API-CONTRACT.md §3). All nullable;
+    // NULL = "use the server global env default" for that setting.
+    this.addColumnIfMissing('rooms', 'max_auto_turns', 'INTEGER');
+    this.addColumnIfMissing('rooms', 'retention_days', 'REAL');
+    this.addColumnIfMissing('rooms', 'storage_bytes', 'INTEGER');
   }
 
   /** Migration-safe ALTER TABLE … ADD COLUMN guarded by a pragma table_info check. */
@@ -500,9 +536,11 @@ export class Store {
     this.db
       .prepare(
         `INSERT INTO rooms (id, name, created_by, created_at, agents_paused, archived_at,
-                            summary_markdown, summary_updated_by, summary_updated_at)
+                            summary_markdown, summary_updated_by, summary_updated_at,
+                            max_auto_turns, retention_days, storage_bytes)
          VALUES (@id, @name, @created_by, @created_at, @agents_paused, @archived_at,
-                 @summary_markdown, @summary_updated_by, @summary_updated_at)`,
+                 @summary_markdown, @summary_updated_by, @summary_updated_at,
+                 @max_auto_turns, @retention_days, @storage_bytes)`,
       )
       .run(row);
   }
@@ -530,6 +568,38 @@ export class Store {
          WHERE id = ?`,
       )
       .run(summaryMarkdown, updatedBy, ts, roomId);
+  }
+
+  /**
+   * Apply a three-valued Tier-1 settings patch (docs/API-CONTRACT.md §3): only
+   * fields present (a number to set, or explicit null to clear back to the global
+   * default) are written; omitted fields (undefined) are left unchanged. An
+   * all-undefined patch (empty body) is a no-op.
+   */
+  updateRoomSettings(
+    roomId: string,
+    patch: {
+      max_auto_turns?: number | null;
+      retention_days?: number | null;
+      storage_bytes?: number | null;
+    },
+  ): void {
+    const cols: string[] = [];
+    const vals: Array<number | null> = [];
+    if (patch.max_auto_turns !== undefined) {
+      cols.push('max_auto_turns = ?');
+      vals.push(patch.max_auto_turns);
+    }
+    if (patch.retention_days !== undefined) {
+      cols.push('retention_days = ?');
+      vals.push(patch.retention_days);
+    }
+    if (patch.storage_bytes !== undefined) {
+      cols.push('storage_bytes = ?');
+      vals.push(patch.storage_bytes);
+    }
+    if (cols.length === 0) return;
+    this.db.prepare(`UPDATE rooms SET ${cols.join(', ')} WHERE id = ?`).run(...vals, roomId);
   }
 
   /** Rooms where the user is a participant, ascending by room created_at. */

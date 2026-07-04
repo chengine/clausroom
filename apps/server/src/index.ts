@@ -136,7 +136,7 @@ function main(): void {
     }
   }
 
-  const hub = new WsHub(store, config.sessionTtlDays);
+  const hub = new WsHub(store, config);
   const rateLimiter = new MessageRateLimiter();
   // Retention sweep: once on boot, then every 10 minutes (unref()'d interval).
   const stopRetentionSweep = startRetentionSweep(store);
@@ -152,14 +152,14 @@ function main(): void {
   app.use(express.json({ limit: 1048576 }));
 
   // /api/auth/login (no auth) + /api/me (self-authenticated).
-  app.use('/api', authRoutes(store, config.sessionTtlDays));
+  app.use('/api', authRoutes(store, config));
   // Everything else under /api requires a session or bridge token.
   app.use('/api', authMiddleware(store, config.sessionTtlDays));
-  app.use('/api', roomRoutes(store, config));
+  app.use('/api', roomRoutes(store, config, hub));
   app.use('/api', participantRoutes(store));
   app.use('/api', myAgentRoutes(store, hub, config));
-  app.use('/api', pauseRoutes(store, hub));
-  app.use('/api', summaryRoutes(store, hub));
+  app.use('/api', pauseRoutes(store, hub, config));
+  app.use('/api', summaryRoutes(store, hub, config));
   app.use('/api', messageRoutes(store, hub, config, rateLimiter));
   app.use('/api', artifactRoutes(store, hub, config));
   app.use('/api', approvalRoutes(store, hub));

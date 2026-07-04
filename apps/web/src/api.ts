@@ -23,6 +23,7 @@ import {
   type PostMessageRequest,
   type Role,
   type Room,
+  type RoomSettingsPatchRequest,
   type UpdateSummaryRequest,
   type User,
 } from '@clausroom/protocol';
@@ -104,7 +105,7 @@ function optionalNumber(value: unknown): number | undefined {
 // ---------------------------------------------------------------------------
 
 interface RequestOptions {
-  method?: 'GET' | 'POST' | 'PUT';
+  method?: 'GET' | 'POST' | 'PUT' | 'PATCH';
   token?: string | null;
   body?: unknown;
 }
@@ -234,6 +235,25 @@ export async function updateSummary(
   const data = asRecord(
     await request(`/api/rooms/${roomId}/summary`, { method: 'PUT', token, body }),
     'update summary',
+  );
+  return RoomSchema.parse(data.room);
+}
+
+/**
+ * PATCH /api/rooms/:id/settings — update this room's Tier-1 per-room setting
+ * overrides live (OWNER only; docs/API-CONTRACT.md §3). Each field is optional
+ * and three-valued: omit = leave unchanged, `null` = clear back to the server
+ * global default, a number = set the override. Returns the updated Room with the
+ * recomputed `effective_settings`; the server also broadcasts `room_updated`.
+ */
+export async function patchRoomSettings(
+  token: string,
+  roomId: string,
+  patch: RoomSettingsPatchRequest,
+): Promise<Room> {
+  const data = asRecord(
+    await request(`/api/rooms/${roomId}/settings`, { method: 'PATCH', token, body: patch }),
+    'room settings',
   );
   return RoomSchema.parse(data.room);
 }

@@ -47,6 +47,29 @@ export const UserSchema = z.object({
 });
 export type User = z.infer<typeof UserSchema>;
 
+/**
+ * Resolved (effective) per-room numeric settings the UI needs. The server
+ * computes each as `room override ?? server global env default` and reads the
+ * resolved value PER-REQUEST — so the turn-limit check, the artifact retention
+ * sweep, and the storage-quota check all honor a live override with NO restart.
+ * These are Tier-1 host-owned settings (see docs/API-CONTRACT.md §3 and the
+ * Tier-1/Tier-2 security split).
+ */
+export const RoomEffectiveSettingsSchema = z.object({
+  /** Effective consecutive-agent turn limit (room override ?? AGENT_ROOM_MAX_AUTO_TURNS). */
+  max_auto_turns: z.number().int().positive(),
+  /**
+   * Effective artifact retention in float days (room override ??
+   * AGENT_ROOM_ARTIFACT_RETENTION_DAYS). `0` = immediate expiry; `null` =
+   * retention disabled (the global default is `off`/negative and the room set no
+   * override — matches the server's ServerConfig.artifactRetentionDays).
+   */
+  retention_days: z.number().nonnegative().nullable(),
+  /** Effective per-room storage quota in bytes (room override ?? AGENT_ROOM_ROOM_STORAGE_BYTES). */
+  storage_bytes: z.number().int().positive(),
+});
+export type RoomEffectiveSettings = z.infer<typeof RoomEffectiveSettingsSchema>;
+
 export const RoomSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -64,6 +87,26 @@ export const RoomSchema = z.object({
   /** User id of whoever last updated the summary. Null when never updated. */
   summary_updated_by: z.string().nullable().optional(),
   summary_updated_at: TimestampSchema.nullable().optional(),
+  /**
+   * Per-room setting OVERRIDES (Tier 1: owner-owned and server-owned; changed
+   * live via PATCH /api/rooms/:id/settings). `null` = fall back to the server
+   * global env default for that setting; a number pins the override. The server
+   * reads the resolved value (see `effective_settings`) PER-REQUEST, so changes
+   * take effect with NO restart. These fields are always present from a v0.1
+   * server (null when unset); optional here only so clients tolerate pre-v0.1
+   * servers during rolling upgrades. See docs/API-CONTRACT.md §3.
+   */
+  /** Override for AGENT_ROOM_MAX_AUTO_TURNS (int 1..100). null = use global default. */
+  max_auto_turns: z.number().int().min(1).max(100).nullable().optional(),
+  /** Override for AGENT_ROOM_ARTIFACT_RETENTION_DAYS (float days >= 0; 0 = immediate expiry). null = use global default. */
+  retention_days: z.number().nonnegative().nullable().optional(),
+  /** Override for AGENT_ROOM_ROOM_STORAGE_BYTES (int > 0). null = use global default. */
+  storage_bytes: z.number().int().positive().nullable().optional(),
+  /**
+   * Resolved effective settings (each = override ?? global default) the UI needs.
+   * The server always includes this; optional here only for pre-v0.1 tolerance.
+   */
+  effective_settings: RoomEffectiveSettingsSchema.optional(),
 });
 export type Room = z.infer<typeof RoomSchema>;
 
@@ -219,6 +262,26 @@ export const UpdateSummaryRequestSchema = z.object({
   summary_markdown: z.string().min(1).max(DEFAULTS.SUMMARY_MAX_CHARS).nullable(),
 });
 export type UpdateSummaryRequest = z.infer<typeof UpdateSummaryRequestSchema>;
+
+/**
+ * PATCH /api/rooms/:id/settings request body (OWNER only) — live Tier-1 per-room
+ * setting overrides. Each field is OPTIONAL and three-valued:
+ *   - omitted  → leave that override unchanged;
+ *   - explicit `null` → clear the override back to the server global env default;
+ *   - a number → set the override (validated against the ranges below).
+ * Ranges mirror the RoomSchema override fields. The server validates ranges,
+ * updates the room, broadcasts `room_updated` (including `effective_settings`),
+ * and applies the change PER-REQUEST with NO restart. See docs/API-CONTRACT.md §3.
+ */
+export const RoomSettingsPatchRequestSchema = z.object({
+  /** int 1..100; null clears back to AGENT_ROOM_MAX_AUTO_TURNS. */
+  max_auto_turns: z.number().int().min(1).max(100).nullable().optional(),
+  /** float days >= 0 (0 = immediate expiry); null clears back to AGENT_ROOM_ARTIFACT_RETENTION_DAYS. */
+  retention_days: z.number().nonnegative().nullable().optional(),
+  /** int > 0; null clears back to AGENT_ROOM_ROOM_STORAGE_BYTES. */
+  storage_bytes: z.number().int().positive().nullable().optional(),
+});
+export type RoomSettingsPatchRequest = z.infer<typeof RoomSettingsPatchRequestSchema>;
 
 // ---------------------------------------------------------------------------
 // Self-service agent provisioning & bridge join blob (onboarding v2)

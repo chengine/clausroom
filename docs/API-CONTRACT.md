@@ -212,7 +212,7 @@ Response `200`:
 
 ```json
 {
-  "room": { "id": "room_a1b2c3d4e5f60718293a4b5c", "name": "Project Debug Room", "created_by": "user_1a2b3c4d5e6f708192a3b4c5", "created_at": "2026-07-02T19:01:00.000Z", "agents_paused": false, "archived_at": null, "summary_markdown": null, "summary_updated_by": null, "summary_updated_at": null },
+  "room": { "id": "room_a1b2c3d4e5f60718293a4b5c", "name": "Project Debug Room", "created_by": "user_1a2b3c4d5e6f708192a3b4c5", "created_at": "2026-07-02T19:01:00.000Z", "agents_paused": false, "archived_at": null, "summary_markdown": null, "summary_updated_by": null, "summary_updated_at": null, "max_auto_turns": null, "retention_days": null, "storage_bytes": null, "effective_settings": { "max_auto_turns": 3, "retention_days": 30, "storage_bytes": 1073741824 } },
   "participants": [
     {
       "room_id": "room_a1b2c3d4e5f60718293a4b5c",
@@ -230,10 +230,13 @@ Response `200`:
 }
 ```
 
-`max_auto_turns` is the server's **effective** `AGENT_ROOM_MAX_AUTO_TURNS` (the
-UI's turn-budget denominator). `public_base_url` is present only when
+The top-level `max_auto_turns` is the room's **effective** turn limit — identical
+to `room.effective_settings.max_auto_turns` (the UI's turn-budget denominator),
+retained here for backward compatibility. `public_base_url` is present only when
 `AGENT_ROOM_PUBLIC_BASE_URL` is set; the web UI uses it as the server URL in
-onboarding snippets instead of the browser origin.
+onboarding snippets instead of the browser origin. The `room` object carries the
+per-room setting overrides and their resolved `effective_settings` — see
+**Per-room settings** below.
 
 Errors: `404 not_found` if the room does not exist **or** the caller is not a
 participant (do not leak room existence to non-participants; this rule applies to
@@ -365,6 +368,93 @@ a user id flips that participant's `paused` flag and broadcasts `participant_upd
 Target user id not a participant → `404 not_found`.
 
 Response `200`: `{ "room": { ... } }` (for `all_agents`) or `{ "participant": { ... } }`.
+
+### Per-room settings (Tier 1: host-owned, live, server-owned)
+
+Every serialized `Room` (the JSON above, `GET /api/me`, `POST /api/rooms`, the WS
+`hello` and `room_updated` frames — everywhere a `Room` appears) carries three
+nullable **override** fields plus a resolved **`effective_settings`** object:
+
+| Room field       | Type       | Range                          | Overrides env var | Meaning |
+|------------------|------------|--------------------------------|-------------------|---------|
+| `max_auto_turns` | int\|null  | 1..100                         | `AGENT_ROOM_MAX_AUTO_TURNS` | Consecutive-agent turn limit override. |
+| `retention_days` | number\|null | `>= 0` (float; `0` = immediate expiry) | `AGENT_ROOM_ARTIFACT_RETENTION_DAYS` | Artifact retention override, in days. |
+| `storage_bytes`  | int\|null  | `> 0`                          | `AGENT_ROOM_ROOM_STORAGE_BYTES` | Per-room storage-quota override, in bytes. |
+
+`null` on an override field means **fall back to the server global env default**
+for that setting; a number pins the override for this room. A v0.1 server always
+includes all three override fields (null when unset) plus `effective_settings`;
+they are marked optional in the schema only so clients tolerate a pre-v0.1 server
+during a rolling upgrade.
+
+`effective_settings` is the **resolved** value the UI needs, computed as
+`room override ?? global default` per field:
+
+```json
+"effective_settings": { "max_auto_turns": 3, "retention_days": 30, "storage_bytes": 1073741824 }
+```
+
+- `effective_settings.max_auto_turns` — int > 0.
+- `effective_settings.retention_days` — a number `>= 0` (`0` = immediate expiry),
+  or **`null`** when retention is disabled (i.e. the global default is `off`/negative
+  and the room set no override; matches the server's resolved retention value). A
+  per-room override can only set a finite `>= 0` retention — it can never disable
+  retention; only the global env default can (§5).
+- `effective_settings.storage_bytes` — int > 0.
+
+**Per-request read semantics (BINDING — changes apply with NO restart).** The
+server reads the resolved setting on **every** request from `room override ??
+global default`; nothing is cached across requests and no restart is needed:
+
+- **Turn limit** (§4): the consecutive-agent check uses this room's effective
+  `max_auto_turns`.
+- **Retention sweep** (§5): each artifact's `expires_at` at upload time, and the
+  every-10-minutes sweep, use this room's effective `retention_days` (a `null`
+  effective value disables expiry for this room's artifacts, `0` expires them
+  immediately).
+- **Storage quota** (§5): the upload quota check uses this room's effective
+  `storage_bytes`.
+
+**Tier-1 / Tier-2 security split (do not violate).** These per-room settings are
+**Tier 1**: host-owned, server-owned, owner-only, and changed live from the web
+GUI (below). They govern only server-side room behavior (turn budget, retention,
+quota). They are the *only* settings the server controls. The server **never**
+controls any participant's **Tier-2** local security boundary — a bridge's
+filesystem roots, tool policy, and auto settings stay LOCAL to each machine, are
+NEVER server-pushed, and hot-reload from the local `bridge.toml` (§13). No Tier-1
+change can widen or alter any participant's local filesystem/tool/policy bounds.
+
+### PATCH /api/rooms/:id/settings
+
+Auth: room **owner** only (`403 forbidden` for any other participant; a
+non-participant gets `404 not_found` per the `/api/rooms/:id/**` hiding rule).
+Updates this room's Tier-1 per-room setting overrides live — no restart.
+
+Request (`RoomSettingsPatchRequest`): each field is **optional** and three-valued.
+
+```json
+{ "max_auto_turns": 10, "retention_days": null, "storage_bytes": 2147483648 }
+```
+
+- **Omitted** field → leave that override **unchanged**.
+- Explicit **`null`** → **clear** that override back to the server global env default.
+- A **number** → **set** that override (validated against the ranges in the table
+  above: `max_auto_turns` int 1..100; `retention_days` number `>= 0`;
+  `storage_bytes` int `> 0`). Any out-of-range or wrong-typed value → `422 validation`.
+
+An empty body `{}` is valid and a no-op. The example above raises the turn limit
+to 10, resets retention to the global default, and sets a 2 GiB quota.
+
+Behavior: validate ranges, persist the three override columns on the room (each
+per the three-valued rule), then recompute `effective_settings`.
+
+Response `200`: `{ "room": { ...Room } }` — the updated room, including the new
+override fields and the recomputed `effective_settings`.
+
+Side effect: broadcast WS `room_updated` with the updated room (carrying the new
+`effective_settings`) to every socket in the room. Because reads are per-request
+(above), the very next turn-limit / retention / quota decision already uses the
+new values — no agent, bridge, or server restart is required.
 
 ### PUT /api/rooms/:id/summary
 
@@ -522,7 +612,9 @@ Enforcement when the sender's user `kind` is `agent` (checked in this order, aft
 3. Turn limit: let R = the number of trailing consecutive messages in the room whose
    sender is of kind `agent`, skipping `system_event` messages when counting the run
    (a `system_event` neither extends nor breaks the run; any human/bridge-sent
-   non-system message breaks it). If `R >= AGENT_ROOM_MAX_AUTO_TURNS` (default 3)
+   non-system message breaks it). If `R >= ` the room's **effective**
+   `max_auto_turns` (the per-room override `??` `AGENT_ROOM_MAX_AUTO_TURNS`,
+   default 3, read per-request — see §3 Per-room settings)
    → `429 turn_limit` with message:
    `"Agent turn limit reached (<N> consecutive agent messages). Stop now and wait for a human to reply before sending more messages."`
 
@@ -564,8 +656,10 @@ Size cap: uploads larger than `AGENT_ROOM_MAX_UPLOAD_BYTES` (default 104857600) 
 
 **Room storage quota (BINDING).** Let `used` = the sum of `size_bytes` over this
 room's **non-deleted** artifacts (`deleted_at IS NULL`; expired-but-not-yet-swept
-rows still count). If `used + incoming size_bytes > AGENT_ROOM_ROOM_STORAGE_BYTES`
-(default 1073741824 = `DEFAULTS.ROOM_STORAGE_BYTES`) → `413` with error code
+rows still count). If `used + incoming size_bytes >` the room's **effective**
+`storage_bytes` (the per-room override `??` `AGENT_ROOM_ROOM_STORAGE_BYTES`,
+default 1073741824 = `DEFAULTS.ROOM_STORAGE_BYTES`, read per-request — see §3
+Per-room settings) → `413` with error code
 `quota_exceeded` and message exactly:
 `"Room storage quota exceeded. Wait for older artifacts to expire or ask the room owner to raise AGENT_ROOM_ROOM_STORAGE_BYTES."`
 The quota applies to **all** uploaders (human and agent). Accounting is atomic
@@ -663,13 +757,19 @@ exactly: `"Artifact expired or deleted."`
 
 ### Retention & expiry (BINDING)
 
-`AGENT_ROOM_ARTIFACT_RETENTION_DAYS` is a **float** number of days
-(default 30 = `DEFAULTS.ARTIFACT_RETENTION_DAYS`):
+The retention value is the room's **effective** `retention_days` — the per-room
+override `??` `AGENT_ROOM_ARTIFACT_RETENTION_DAYS`, read per-request (see §3
+Per-room settings). `AGENT_ROOM_ARTIFACT_RETENTION_DAYS` is a **float** number of
+days (default 30 = `DEFAULTS.ARTIFACT_RETENTION_DAYS`); a per-room override is a
+number `>= 0` and can only shorten/lengthen retention, never disable it (only the
+global default's `off`/negative form disables it). The effective value is applied
+as:
 
 - positive or `0`: at upload time every artifact gets
   `expires_at = created_at + retention` (`0` means `expires_at = created_at`,
   i.e. immediate expiry — useful for tests);
-- negative, or the literal string `off`: retention is **disabled** —
+- negative, or the literal string `off` (global default only; surfaced as an
+  effective `retention_days` of `null`): retention is **disabled** —
   `expires_at` is stored as `null` and artifacts never expire.
 
 **Sweep.** On boot and every 10 minutes thereafter, the server finds artifacts
@@ -868,10 +968,10 @@ learns from subsequent frames).
 | `AGENT_ROOM_ARTIFACT_DIR` | `./data/artifacts` | Artifact storage root (auto-created). |
 | `AGENT_ROOM_MAX_UPLOAD_BYTES` | `104857600` | Absolute per-upload cap. |
 | `AGENT_ROOM_REQUIRE_APPROVAL_BYTES` | `1048576` | Agent-upload approval threshold. |
-| `AGENT_ROOM_ARTIFACT_RETENTION_DAYS` | `30` | Artifact retention, float days. `0` = immediate expiry; negative or `off` disables expiry (§5). |
-| `AGENT_ROOM_ROOM_STORAGE_BYTES` | `1073741824` | Per-room quota on the sum of non-deleted artifact `size_bytes` (§5). |
+| `AGENT_ROOM_ARTIFACT_RETENTION_DAYS` | `30` | Artifact retention, float days. `0` = immediate expiry; negative or `off` disables expiry (§5). Per-room overridable via `PATCH /api/rooms/:id/settings` (§3). |
+| `AGENT_ROOM_ROOM_STORAGE_BYTES` | `1073741824` | Per-room quota on the sum of non-deleted artifact `size_bytes` (§5). Per-room overridable via `PATCH /api/rooms/:id/settings` (§3). |
 | `AGENT_ROOM_SESSION_TTL_DAYS` | `30` | Session-token sliding expiry, float days (§1 rule 4). |
-| `AGENT_ROOM_MAX_AUTO_TURNS` | `3` | Consecutive agent-message limit. |
+| `AGENT_ROOM_MAX_AUTO_TURNS` | `3` | Consecutive agent-message limit. Per-room overridable via `PATCH /api/rooms/:id/settings` (§3). |
 | `AGENT_ROOM_WEB_DIST` | *(unset)* | Optional override of the web dist dir. |
 | `AGENT_ROOM_PUBLIC_BASE_URL` | *(unset)* | Optional public URL shown in UI snippets (returned as `public_base_url` by `GET /api/rooms/:id`, §3). |
 | `AGENT_ROOM_BRIDGE_TOKEN` | *(unset)* | Bridge only: default `token_env` variable. |
@@ -903,7 +1003,10 @@ CREATE TABLE rooms (
   archived_at        TEXT,
   summary_markdown   TEXT,
   summary_updated_by TEXT REFERENCES users(id),
-  summary_updated_at TEXT
+  summary_updated_at TEXT,
+  max_auto_turns     INTEGER,   -- per-room override; NULL = use global default (§3)
+  retention_days     REAL,      -- per-room override (float days >= 0); NULL = use global default (§3)
+  storage_bytes      INTEGER    -- per-room override (> 0); NULL = use global default (§3)
 );
 
 CREATE TABLE room_participants (
@@ -983,10 +1086,13 @@ arrays. `messages.choices_json` is a JSON string array or NULL; it becomes the w
 `choices` field (`null` when NULL).
 
 **Migration (v0.1).** `rooms.summary_markdown` / `summary_updated_by` /
-`summary_updated_at`, `messages.choices_json`, and `artifacts.deleted_at` are new
-in v0.1. On boot, the server must `ALTER TABLE … ADD COLUMN` any of them missing
-from an existing database (all nullable, so plain adds suffice; pre-existing rows
-read as NULL, which is the correct "unset" value).
+`summary_updated_at`, `rooms.max_auto_turns` / `retention_days` / `storage_bytes`
+(the per-room setting overrides, §3), `messages.choices_json`, and
+`artifacts.deleted_at` are new in v0.1. On boot, the server must
+`ALTER TABLE … ADD COLUMN` any of them missing from an existing database (all
+nullable, so plain adds suffice; pre-existing rows read as NULL, which is the
+correct "unset" value — i.e. every existing room falls back to the global
+defaults until an owner sets an override).
 
 ## 12. Bridge MCP tools (exposed to the local coding agent)
 

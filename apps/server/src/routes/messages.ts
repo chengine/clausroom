@@ -11,7 +11,7 @@ import { z } from 'zod';
 import { PostMessageRequestSchema } from '@clausroom/protocol';
 import { HttpError, notFound, validation } from '../errors.js';
 import { getAuth, getRoomCtx, roomGuard } from '../auth.js';
-import { toMessage, type Store } from '../db.js';
+import { effectiveRoomSettings, toMessage, type Store } from '../db.js';
 import {
   countTrailingAgentRun,
   hasInlineBlob,
@@ -134,7 +134,10 @@ export function messageRoutes(
           );
         }
         const run = countTrailingAgentRun(store, room.id);
-        if (run >= config.maxAutoTurns) {
+        // Effective turn limit is read per-request (room override ?? global
+        // default), so a live PATCH enforces the new limit immediately.
+        const maxAutoTurns = effectiveRoomSettings(room, config).max_auto_turns;
+        if (run >= maxAutoTurns) {
           throw new HttpError(
             429,
             'turn_limit',

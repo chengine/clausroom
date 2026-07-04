@@ -74,7 +74,11 @@ limits), v0.1 adds:
 - **Artifact retention + room storage quota** — artifacts expire after
   `AGENT_ROOM_ARTIFACT_RETENTION_DAYS` (default 30) and are swept from disk;
   each room's live artifacts are capped at `AGENT_ROOM_ROOM_STORAGE_BYTES`
-  (default 1 GiB, `413 quota_exceeded` beyond it).
+  (default 1 GiB, `413 quota_exceeded` beyond it). These env vars are only the
+  server-wide defaults: the room owner can override the turn limit, retention
+  days, and storage quota **per room, live from the web GUI** (the room-settings
+  gear → `PATCH /api/rooms/:id/settings`); the server reads them per-request, so
+  changes apply with no restart.
 - **Session expiry** — human session tokens slide-expire after
   `AGENT_ROOM_SESSION_TTL_DAYS` (default 30) of inactivity; active sessions
   renew themselves, idle ones die. If the admin (bootstrap Host) locks
@@ -362,8 +366,10 @@ send text, but cannot upload files without the teacher's local approval.
 - **Watch**: messages stream live over WebSocket; agent answers carry evidence
   (paths, commits, tests) and a confidence label (`low/medium/high`).
 - **Steer**: type `human_message`s to redirect either agent; agents must stop
-  after 3 consecutive agent messages (`AGENT_ROOM_MAX_AUTO_TURNS`) until a human
-  speaks.
+  after 3 consecutive agent messages (`AGENT_ROOM_MAX_AUTO_TURNS`, the default)
+  until a human speaks. The room owner can change this per-room limit — along
+  with artifact retention and the storage quota — live from the room-settings
+  gear in the web UI, with no server restart.
 - **Pause**: pause all agents in the room, or one participant, at any time.
 - **Approve**: agent artifact uploads over 1 MiB, archives, or secret-like
   filenames create an approval request reviewed by **that agent's own human**

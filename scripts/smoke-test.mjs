@@ -18,7 +18,7 @@ import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import Database from 'better-sqlite3';
 import WebSocket from 'ws';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -29,6 +29,7 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..
 const SERVER_ENTRY = path.join(REPO_ROOT, 'apps', 'server', 'dist', 'index.js');
 const BRIDGE_ENTRY = path.join(REPO_ROOT, 'apps', 'bridge', 'dist', 'index.js');
 const BUNDLE_ENTRY = path.join(REPO_ROOT, 'apps', 'bridge', 'dist-npm', 'cli.mjs');
+const RELOAD_MODULE = path.join(REPO_ROOT, 'apps', 'bridge', 'dist', 'reload.js');
 
 const EXPECTED_TOOLS = [
   'room_get_status',
@@ -1812,6 +1813,278 @@ async function main() {
       // decode tolerates surrounding whitespace / padding (§13).
       const loose = decodeJoinBlob(`  ${encoded}  `);
       assertEq(loose.token, input.token, 'decode tolerates surrounding whitespace');
+    });
+
+    // -- l. two-tier config: live Tier-1 room settings + Tier-2 hot-reload -------
+
+    await step('room-settings-live-turn-limit', async () => {
+      // Owner lowers the consecutive-agent turn limit LIVE (Tier-1 PATCH); the
+      // server reads it per-request, so it must bite on the very next messages
+      // with NO restart (contract §3 Per-room settings, §4 turn limit).
+
+      // A human message first resets the trailing agent run to 0.
+      expectStatus(
+        await api('POST', `/api/rooms/${room.id}/messages`, {
+          token: student.token,
+          json: {
+            message_type: 'human_message',
+            body_markdown: 'Resetting the run before the live turn-limit test.',
+          },
+        }),
+        201,
+        'human reset before live turn limit',
+      );
+
+      // A non-owner human (the teacher is a guest, not the owner) cannot PATCH.
+      expectError(
+        await api('PATCH', `/api/rooms/${room.id}/settings`, {
+          token: teacher.token,
+          json: { max_auto_turns: 99 },
+        }),
+        403,
+        'forbidden',
+        'guest human PATCH room settings',
+      );
+
+      // Owner PATCHes max_auto_turns down to 2 — no server restart.
+      const patched = expectStatus(
+        await api('PATCH', `/api/rooms/${room.id}/settings`, {
+          token: student.token,
+          json: { max_auto_turns: 2 },
+        }),
+        200,
+        'owner PATCH max_auto_turns=2',
+      );
+      assertEq(patched.data.room.max_auto_turns, 2, 'override persisted');
+      assertEq(
+        patched.data.room.effective_settings.max_auto_turns,
+        2,
+        'effective turn limit is 2 after PATCH',
+      );
+
+      // Run is 0 and the live limit is 2: two agent messages pass, the 3rd 429s.
+      expectStatus(
+        await api('POST', `/api/rooms/${room.id}/messages`, {
+          token: studentAgentBridgeToken,
+          json: { message_type: 'agent_answer', body_markdown: 'Live-limit agent message #1.' },
+        }),
+        201,
+        'agent message #1 under live limit 2',
+      );
+      expectStatus(
+        await api('POST', `/api/rooms/${room.id}/messages`, {
+          token: studentAgentBridgeToken,
+          json: { message_type: 'agent_answer', body_markdown: 'Live-limit agent message #2.' },
+        }),
+        201,
+        'agent message #2 under live limit 2',
+      );
+      const blocked = expectError(
+        await api('POST', `/api/rooms/${room.id}/messages`, {
+          token: studentAgentBridgeToken,
+          json: {
+            message_type: 'agent_answer',
+            body_markdown: 'Live-limit agent message #3 (should 429).',
+          },
+        }),
+        429,
+        'turn_limit',
+        '3rd consecutive agent message under the live limit of 2',
+      );
+      assertEq(
+        blocked.data.error.message,
+        'Agent turn limit reached (2 consecutive agent messages). Stop now and wait for a human to reply before sending more messages.',
+        'live turn_limit message reflects the new limit (2)',
+      );
+
+      // Owner clears the override (null) -> back to the env default (3), live.
+      const reset = expectStatus(
+        await api('PATCH', `/api/rooms/${room.id}/settings`, {
+          token: student.token,
+          json: { max_auto_turns: null },
+        }),
+        200,
+        'owner PATCH max_auto_turns=null (reset to env default)',
+      );
+      assertEq(reset.data.room.max_auto_turns, null, 'override cleared to null');
+      assertEq(
+        reset.data.room.effective_settings.max_auto_turns,
+        3,
+        'effective turn limit back to the env default (3)',
+      );
+
+      // The trailing run is still 2; at the default limit of 3 the same next
+      // agent message is now allowed — the reset took effect with no restart.
+      expectStatus(
+        await api('POST', `/api/rooms/${room.id}/messages`, {
+          token: studentAgentBridgeToken,
+          json: {
+            message_type: 'agent_answer',
+            body_markdown: 'Allowed again after resetting the limit to the default.',
+          },
+        }),
+        201,
+        'agent message allowed after PATCH null reset',
+      );
+    });
+
+    await step('room-settings-quota', async () => {
+      // Owner tightens the per-room storage quota LIVE (Tier-1 PATCH); the next
+      // agent upload must 413 quota_exceeded with no restart, then succeed once
+      // the quota is cleared back to the env default (contract §3, §5).
+      const tiny = expectStatus(
+        await api('PATCH', `/api/rooms/${room.id}/settings`, {
+          token: student.token,
+          json: { storage_bytes: 1 },
+        }),
+        200,
+        'owner PATCH storage_bytes=1',
+      );
+      assertEq(tiny.data.room.storage_bytes, 1, 'quota override persisted');
+      assertEq(
+        tiny.data.room.effective_settings.storage_bytes,
+        1,
+        'effective quota is 1 byte after PATCH',
+      );
+
+      // An agent upload (bridge token) now exceeds the 1-byte quota -> 413.
+      const probe1 = multipartBody('quota-probe.txt', 'quota probe payload\n', {
+        description: 'Should be rejected by the live quota.',
+      });
+      const rejected = expectError(
+        await api('POST', `/api/rooms/${room.id}/artifacts`, {
+          token: studentAgentBridgeToken,
+          body: probe1.body,
+          headers: { 'content-type': probe1.contentType },
+        }),
+        413,
+        'quota_exceeded',
+        'agent upload over the live quota',
+      );
+      assertEq(
+        rejected.data.error.message,
+        'Room storage quota exceeded. Wait for older artifacts to expire or ask the room owner to raise AGENT_ROOM_ROOM_STORAGE_BYTES.',
+        'quota_exceeded message',
+      );
+
+      // Owner clears the override (null) -> back to the env default (1 GiB), live.
+      const raised = expectStatus(
+        await api('PATCH', `/api/rooms/${room.id}/settings`, {
+          token: student.token,
+          json: { storage_bytes: null },
+        }),
+        200,
+        'owner PATCH storage_bytes=null (reset to env default)',
+      );
+      assertEq(raised.data.room.storage_bytes, null, 'quota override cleared to null');
+
+      // The same agent upload now succeeds under the restored default quota.
+      const probe2 = multipartBody('quota-probe.txt', 'quota probe payload\n', {
+        description: 'Should be accepted after the quota is raised back.',
+      });
+      const ok = expectStatus(
+        await api('POST', `/api/rooms/${room.id}/artifacts`, {
+          token: studentAgentBridgeToken,
+          body: probe2.body,
+          headers: { 'content-type': probe2.contentType },
+        }),
+        201,
+        'agent upload after the quota is raised back',
+      );
+      assert(
+        typeof ok.data.artifact.id === 'string' && ok.data.artifact.id.startsWith('art_'),
+        'upload produced an artifact',
+      );
+    });
+
+    await step('bridge-hot-reload', async () => {
+      // Tier-2 LOCAL config hot-reload: the bridge watches bridge.toml and swaps
+      // the in-memory config on change with NO restart. We drive the compiled
+      // watcher module directly (the robust path — no flaky stdio server) and
+      // assert the live config object reflects the NEW values after an edit.
+      const { startConfigWatcher } = await import(pathToFileURL(RELOAD_MODULE).href);
+
+      const hotDir = path.join(tmpRoot, 'hot-reload');
+      const rootA = path.join(hotDir, 'root-a');
+      const rootB = path.join(hotDir, 'root-b');
+      await fsp.mkdir(rootA, { recursive: true });
+      await fsp.mkdir(rootB, { recursive: true });
+      const cfgPath = path.join(hotDir, 'bridge.toml');
+
+      const configText = (uploads, root, marker) =>
+        [
+          '[identity]',
+          'human_name  = "Hot Human"',
+          'agent_name  = "Hot Agent"',
+          'bridge_name = "hot-bridge"',
+          '',
+          '[room]',
+          `server_url = ${tomlStr(baseUrl)}`,
+          `room_id    = ${tomlStr(room.id)}`,
+          'token_env  = "AGENT_ROOM_BRIDGE_TOKEN"',
+          '',
+          '[policy]',
+          'read_only_default           = false',
+          `allow_agent_to_upload_files = ${uploads}`,
+          '',
+          '[filesystem]',
+          `roots = [${tomlStr(root)}]`,
+          marker ? `# ${marker}` : '',
+          '',
+        ].join('\n');
+
+      // Initial config: uploads OFF, root A.
+      await fsp.writeFile(cfgPath, configText('false', rootA, ''));
+
+      const logs = [];
+      const store = startConfigWatcher(cfgPath, { log: (line) => logs.push(line) });
+      try {
+        // Read the current (initial) policy/roots straight off the live store.
+        assertEq(
+          store.current.policy.allow_agent_to_upload_files,
+          false,
+          'initial hot-reload uploads flag is false',
+        );
+        assertEq(store.current.filesystem.roots[0], rootA, 'initial hot-reload root is root-a');
+
+        // Let fs.watch arm before the first edit (fs.watch timing tolerance).
+        await sleep(400);
+
+        // Edit the toml: flip the policy flag AND change the root. Retry writes
+        // to tolerate a missed fs.watch event; each retry changes file content
+        // (unique marker comment) so the watcher definitely sees a change.
+        const deadline = Date.now() + 25_000;
+        let reloaded = false;
+        for (let attempt = 0; !reloaded && Date.now() < deadline; attempt += 1) {
+          await fsp.writeFile(
+            cfgPath,
+            configText('true', rootB, `reload attempt ${attempt} at ${Date.now()}`),
+          );
+          const waitUntil = Math.min(Date.now() + 3500, deadline);
+          while (Date.now() < waitUntil) {
+            if (logs.some((l) => /config reloaded/.test(l))) {
+              reloaded = true;
+              break;
+            }
+            await sleep(100);
+          }
+        }
+        assert(reloaded, `no "config reloaded" log within 25s; logs so far: ${logs.join(' | ')}`);
+        assert(
+          logs.some((l) => /changed section\(s\):.*policy/.test(l)),
+          `reload log should name the changed policy section; logs: ${logs.join(' | ')}`,
+        );
+
+        // The live config object reflects the NEW values with NO restart.
+        assertEq(
+          store.current.policy.allow_agent_to_upload_files,
+          true,
+          'hot-reloaded uploads flag is now true',
+        );
+        assertEq(store.current.filesystem.roots[0], rootB, 'hot-reloaded root is now root-b');
+      } finally {
+        store.stop();
+      }
     });
   } catch (err) {
     if (!(err instanceof AbortRun)) {

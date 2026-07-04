@@ -7,10 +7,11 @@ import { PauseRequestSchema } from '@clausroom/protocol';
 import { forbidden, notFound } from '../errors.js';
 import { getAuth, getRoomCtx, roomGuard } from '../auth.js';
 import { toParticipant, toRoom, type Store } from '../db.js';
+import type { ServerConfig } from '../env.js';
 import type { WsHub } from '../ws.js';
 import { h, parse } from './util.js';
 
-export function pauseRoutes(store: Store, hub: WsHub): Router {
+export function pauseRoutes(store: Store, hub: WsHub, config: ServerConfig): Router {
   const router = Router();
 
   router.post(
@@ -28,7 +29,7 @@ export function pauseRoutes(store: Store, hub: WsHub): Router {
         store.setRoomAgentsPaused(room.id, body.paused);
         const updated = store.getRoom(room.id);
         if (!updated) throw notFound('Room not found.');
-        const roomOut = toRoom(updated);
+        const roomOut = toRoom(updated, config);
         hub.broadcast(room.id, { type: 'room_updated', room: roomOut });
         res.status(200).json({ room: roomOut });
         return;

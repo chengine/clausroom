@@ -10,6 +10,7 @@ import { Composer } from './Composer.js';
 import { ConnectAgentPanel } from './ConnectAgentPanel.js';
 import { MessageCard } from './MessageCard.js';
 import { OwnerDrawer } from './OwnerDrawer.js';
+import { RoomSettings, RoomSettingsButton } from './RoomSettings.js';
 import { Sidebar } from './Sidebar.js';
 import { ThemeToggle } from './ThemeToggle.js';
 import {
@@ -44,6 +45,7 @@ const CONN_LABEL: Record<ConnectionState, string> = {
 export function RoomView({ token, roomId, me, onBack, onUnauthorized }: RoomViewProps) {
   const { state, actions } = useRoomState(token, roomId, onUnauthorized);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [pauseBusy, setPauseBusy] = useState(false);
   const [exporting, setExporting] = useState(false);
   // Failures of header/sidebar/timeline actions (pause toggles, export,
@@ -260,6 +262,7 @@ export function RoomView({ token, roomId, me, onBack, onUnauthorized }: RoomView
             <DownloadIcon size={14} />
             {exporting ? 'Exporting…' : 'Export transcript'}
           </button>
+          {state.room && <RoomSettingsButton onClick={() => setSettingsOpen(true)} />}
           {iAmOwner && (
             <button type="button" className="btn btn--primary btn--sm" onClick={() => setDrawerOpen(true)}>
               <PlusIcon size={14} /> Add participant
@@ -389,7 +392,11 @@ export function RoomView({ token, roomId, me, onBack, onUnauthorized }: RoomView
             ) : null
           }
           turnRun={turnRun}
-          maxTurns={state.maxAutoTurns ?? DEFAULTS.MAX_AUTO_TURNS}
+          maxTurns={
+            state.room?.effective_settings?.max_auto_turns ??
+            state.maxAutoTurns ??
+            DEFAULTS.MAX_AUTO_TURNS
+          }
           approvals={state.approvals}
           onUpdateSummary={actions.updateSummary}
           onContinue={() => actions.sendMessage(CONTINUE_MESSAGE_BODY, [])}
@@ -410,6 +417,14 @@ export function RoomView({ token, roomId, me, onBack, onUnauthorized }: RoomView
         nameOf={nameOf}
         onAddParticipant={actions.addParticipant}
         onRotateToken={actions.rotateToken}
+      />
+
+      <RoomSettings
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        room={state.room}
+        canEdit={iAmOwner}
+        onUpdate={actions.updateRoomSettings}
       />
     </div>
   );

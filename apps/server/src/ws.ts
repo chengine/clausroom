@@ -20,6 +20,7 @@ import {
 } from '@clausroom/protocol';
 import { resolveApiToken } from './auth.js';
 import { toParticipant, toRoom, type Store } from './db.js';
+import type { ServerConfig } from './env.js';
 
 interface Conn {
   ws: WebSocket;
@@ -46,7 +47,7 @@ export class WsHub {
 
   constructor(
     private readonly store: Store,
-    private readonly sessionTtlDays: number,
+    private readonly config: ServerConfig,
   ) {
     this.wss = new WebSocketServer({ noServer: true });
   }
@@ -98,7 +99,7 @@ export class WsHub {
       const token = url.searchParams.get('token') ?? '';
       const roomId = url.searchParams.get('room_id') ?? '';
 
-      const auth = resolveApiToken(this.store, token, this.sessionTtlDays);
+      const auth = resolveApiToken(this.store, token, this.config.sessionTtlDays);
       if (auth === 'expired') {
         ws.close(4001, 'expired session token');
         return;
@@ -155,7 +156,7 @@ export class WsHub {
       .map(({ participant, user }) => toParticipant(participant, user));
     const hello: WsServerFrame = {
       type: 'hello',
-      room: toRoom(room),
+      room: toRoom(room, this.config),
       participants,
       presence: this.presence(roomId),
       latest_message_id: this.store.latestMessageId(roomId),
