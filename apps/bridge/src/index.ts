@@ -99,7 +99,7 @@ program
       'exposing MCP tools (stdio) to a local coding agent, plus an autonomous ' +
       'auto-responder (`auto`) that drives a local engine.',
   )
-  .version('0.1.0');
+  .version('0.1.1');
 
 program
   .command('mcp')

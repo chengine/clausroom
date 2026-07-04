@@ -148,6 +148,11 @@ function deniedBy(absPath: string, relPath: string, glob: string): boolean {
   return minimatch(absPath, glob, opts) || minimatch(relPath, glob, opts);
 }
 
+/** True when any deny glob matches the absolute or root-relative path. */
+export function pathIsDenied(absPath: string, relPath: string, denyGlobs: readonly string[]): boolean {
+  return denyGlobs.some((glob) => deniedBy(absPath, relPath, glob));
+}
+
 /**
  * Secret-like filename check (SECRET_NAME_GLOBS): matched against the basename
  * with { dot: true, nocase: true }; globs containing '/' are also matched
@@ -339,6 +344,72 @@ export async function checkWorkdirPolicy(cfg: BridgeConfig, workdir: string): Pr
     `auto.workdir ${absPath} resolves outside the configured filesystem roots (${cfg.filesystem.roots.join(', ')}). ` +
       'Refusing to start the auto responder.',
   );
+}
+
+/** Result of enumerating a bounded, deny-glob-filtered repo file tree. */
+export interface FileTreeResult {
+  /** Indented, root-relative listing (directories carry a trailing '/'). */
+  tree: string;
+  /** Number of entries listed. */
+  count: number;
+  /** True when the cap was hit and the listing is incomplete. */
+  truncated: boolean;
+}
+
+/**
+ * Enumerate a bounded file tree under `root` for injection into the engine
+ * prompt (contract §13 confinement): the auto responder denies the engine's
+ * Glob tool (it cannot be path-scoped and would leak file NAMES outside the
+ * roots), so the bridge itself discovers the structure — staying inside `root`,
+ * honoring `denyGlobs` (defaults + config: these already prune node_modules,
+ * .git, .env, secrets, key material), never following symlinks (which could
+ * escape the root or loop), and capping the listing at `maxEntries`.
+ */
+export async function buildFileTree(
+  root: string,
+  denyGlobs: readonly string[],
+  maxEntries: number,
+): Promise<FileTreeResult> {
+  const lines: string[] = [];
+  let truncated = false;
+
+  const walk = async (dir: string, depth: number): Promise<void> => {
+    if (truncated) return;
+    let entries: import('node:fs').Dirent[];
+    try {
+      entries = await fsp.readdir(dir, { withFileTypes: true });
+    } catch {
+      return; // unreadable directory (EACCES etc.) — skip quietly
+    }
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      if (lines.length >= maxEntries) {
+        truncated = true;
+        return;
+      }
+      // Skip symlinks and special files: only real files/dirs are listed, so
+      // the tree cannot escape `root` or loop through a symlink cycle.
+      if (entry.isSymbolicLink()) continue;
+      const abs = path.join(dir, entry.name);
+      const rel = path.relative(root, abs);
+      const indent = '  '.repeat(depth);
+      if (entry.isDirectory()) {
+        // Prune the whole subtree when a deny glob covers its contents
+        // (e.g. **/node_modules/**, **/.git/**, **/secrets/**). The sentinel
+        // child makes "contents of X" globs match the directory itself.
+        if (pathIsDenied(path.join(abs, '_'), path.join(rel, '_'), denyGlobs)) continue;
+        lines.push(`${indent}${entry.name}/`);
+        await walk(abs, depth + 1);
+        if (truncated) return;
+      } else if (entry.isFile()) {
+        if (pathIsDenied(abs, rel, denyGlobs)) continue;
+        lines.push(`${indent}${entry.name}`);
+      }
+    }
+  };
+
+  await walk(root, 0);
+  return { tree: lines.join('\n'), count: lines.length, truncated };
 }
 
 /**

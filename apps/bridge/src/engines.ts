@@ -21,6 +21,9 @@
  */
 
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { z } from 'zod';
 import type { AutoConfig } from './config.js';
@@ -210,10 +213,221 @@ function runProcess(
   });
 }
 
-/** argv for the given engine (exported for the stderr banner / debugging). */
-export function engineArgv(auto: AutoConfig): { command: string; args: string[] } {
+// ---------------------------------------------------------------------------
+// Filesystem confinement (contract §13): the spawned engine must not read file
+// CONTENTS or enumerate NAMES outside [filesystem].roots. Two layers:
+//   1. Tool permissions (always): scope Read+Grep to the roots via double-slash
+//      absolute matchers, deny write/shell/network tools, and deny the
+//      name-leaky Glob/LS tools unless an OS sandbox enforces the boundary.
+//   2. OS sandbox (defense-in-depth, when bwrap/sandbox-exec is installed):
+//      bind only the roots (read-only) + what the engine needs to run.
+// ---------------------------------------------------------------------------
+
+/** An available OS sandbox that can confine the engine's filesystem view. */
+export interface SandboxInfo {
+  kind: 'bwrap' | 'sandbox-exec';
+  /** Absolute path to the sandbox binary. */
+  bin: string;
+}
+
+/** Everything the engine spawn needs beyond the AutoConfig, resolved once. */
+export interface EngineLaunch {
+  /** Resolved absolute filesystem roots (Read scoping + sandbox binds). */
+  roots: string[];
+  /** Detected OS sandbox, or null → permission-only confinement. */
+  sandbox: SandboxInfo | null;
+}
+
+/** Locate an executable on PATH (no shell); returns its absolute path or null. */
+function findOnPath(bin: string): string | null {
+  for (const dir of (process.env.PATH ?? '').split(path.delimiter)) {
+    if (!dir) continue;
+    const full = path.join(dir, bin);
+    try {
+      fs.accessSync(full, fs.constants.X_OK);
+      return full;
+    } catch {
+      /* not in this dir */
+    }
+  }
+  return null;
+}
+
+/**
+ * Detect an OS sandbox for filesystem confinement: bubblewrap (`bwrap`) on
+ * Linux, `sandbox-exec` on macOS. Returns null when none is available (the
+ * bridge then relies on permission-only confinement + the injected file tree
+ * and warns). Best-effort defense-in-depth: the sandbox wrappers are coded from
+ * the tools' documented interfaces.
+ */
+export function detectSandbox(): SandboxInfo | null {
+  if (process.platform === 'linux') {
+    const bin = findOnPath('bwrap');
+    return bin ? { kind: 'bwrap', bin } : null;
+  }
+  if (process.platform === 'darwin') {
+    const bin = findOnPath('sandbox-exec') ?? '/usr/bin/sandbox-exec';
+    try {
+      fs.accessSync(bin, fs.constants.X_OK);
+      return { kind: 'sandbox-exec', bin };
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/** Tools always denied to the engine: no shell, no writes, no network. */
+const ALWAYS_DENIED_TOOLS = [
+  'Bash',
+  'Edit',
+  'Write',
+  'MultiEdit',
+  'NotebookEdit',
+  'WebFetch',
+  'WebSearch',
+] as const;
+
+/**
+ * Name-enumeration tools that cannot be path-scoped by a matcher on this CLI
+ * (verified: a `Read(//root/**)` matcher confines Read+Grep but NOT Glob/LS).
+ * Denied UNLESS an OS sandbox enforces the filesystem boundary — otherwise they
+ * leak file NAMES outside the roots. The bridge injects a bounded file tree so
+ * the engine can still discover structure without them.
+ */
+const NAME_LEAK_TOOLS = ['Glob', 'LS'] as const;
+
+/** Double-slash absolute matcher that confines Read (and Grep) to `root`. */
+function rootReadMatcher(root: string): string {
+  // '//' + absolute-path-without-leading-slash + '/**'. This form confines both
+  // the Read and the Grep tool to the subtree on the claude CLI (verified).
+  const abs = root.replace(/\\/g, '/').replace(/^\/+/, '');
+  return `Read(//${abs}/**)`;
+}
+
+/**
+ * Translate the SEMANTIC `allowed_tools` list + resolved roots into concrete
+ * claude `--allowedTools` / `--disallowedTools` lists.
+ *   - Read/Grep are ALWAYS scoped to the roots (one `Read(//root/**)` per root).
+ *     This both grants and CONFINES them; without the matcher, dontAsk would
+ *     leave Read/Grep implicitly permitted and UNCONFINED (the security bug).
+ *   - Write/shell/network tools are always denied.
+ *   - Glob/LS are denied unless a sandbox is active and the operator asked for
+ *     them (they cannot be path-scoped).
+ */
+export function claudeToolArgs(
+  allowedTools: readonly string[],
+  roots: readonly string[],
+  sandboxed: boolean,
+): { allowed: string[]; disallowed: string[] } {
+  const allowed: string[] = [];
+  for (const root of [...new Set(roots)]) allowed.push(rootReadMatcher(root));
+
+  const disallowed: string[] = [...ALWAYS_DENIED_TOOLS];
+  const wantsNameTools = allowedTools.some((t) => /^(?:Glob|LS)$/i.test(t));
+  if (sandboxed && wantsNameTools) {
+    allowed.push(...NAME_LEAK_TOOLS); // sandbox enforces the FS boundary
+  } else {
+    disallowed.push(...NAME_LEAK_TOOLS);
+  }
+  return { allowed, disallowed };
+}
+
+/**
+ * Wrap `[command, ...args]` in the OS sandbox so only `roots` are readable and
+ * everything the engine needs to run is bound in. Returns the wrapped argv.
+ * Best-effort defense-in-depth (untested on this machine); if the wrapper
+ * mis-binds, the engine simply fails to spawn and the daemon posts an
+ * apologetic reply and keeps running.
+ */
+export function wrapWithSandbox(
+  sandbox: SandboxInfo,
+  roots: readonly string[],
+  workdir: string,
+  command: string,
+  args: readonly string[],
+): { command: string; args: string[] } {
+  const home = os.homedir();
+  const nodeDir = path.dirname(process.execPath);
+
+  if (sandbox.kind === 'bwrap') {
+    const bwrap: string[] = [
+      '--die-with-parent',
+      '--unshare-user',
+      '--unshare-ipc',
+      '--unshare-uts',
+      // network is intentionally SHARED (not unshared): the engine calls the
+      // model API. Filesystem — not the network — is the confinement boundary.
+      '--proc', '/proc',
+      '--dev', '/dev',
+      '--tmpfs', '/tmp',
+      // System runtime, read-only (needed for node's shared libraries + TLS).
+      '--ro-bind', '/usr', '/usr',
+      '--ro-bind-try', '/bin', '/bin',
+      '--ro-bind-try', '/sbin', '/sbin',
+      '--ro-bind-try', '/lib', '/lib',
+      '--ro-bind-try', '/lib64', '/lib64',
+      // CA certs + resolver + uid/gid lookup, read-only (nothing project-secret).
+      '--ro-bind-try', '/etc/ssl', '/etc/ssl',
+      '--ro-bind-try', '/etc/ca-certificates', '/etc/ca-certificates',
+      '--ro-bind-try', '/etc/pki', '/etc/pki',
+      '--ro-bind-try', '/etc/resolv.conf', '/etc/resolv.conf',
+      '--ro-bind-try', '/etc/hosts', '/etc/hosts',
+      '--ro-bind-try', '/etc/nsswitch.conf', '/etc/nsswitch.conf',
+      '--ro-bind-try', '/etc/passwd', '/etc/passwd',
+      '--ro-bind-try', '/etc/group', '/etc/group',
+      // The node/engine binaries, read-only.
+      '--ro-bind-try', nodeDir, nodeDir,
+    ];
+    // Claude auth/session dirs: writable so headless runs can persist state.
+    bwrap.push('--bind-try', path.join(home, '.claude'), path.join(home, '.claude'));
+    bwrap.push('--bind-try', path.join(home, '.config', 'claude'), path.join(home, '.config', 'claude'));
+    // The engine's own install tree (npm/pnpm global etc.), read-only.
+    bwrap.push('--ro-bind-try', path.join(home, '.local'), path.join(home, '.local'));
+    bwrap.push('--ro-bind-try', path.join(home, '.npm'), path.join(home, '.npm'));
+    // The project roots, READ-ONLY — the confinement boundary.
+    for (const root of [...new Set(roots)]) bwrap.push('--ro-bind', root, root);
+    bwrap.push('--chdir', workdir, '--', command, ...args);
+    return { command: sandbox.bin, args: bwrap };
+  }
+
+  // darwin: sandbox-exec with a generated SBPL profile (deprecated but present
+  // on stock macOS). Default-deny file reads; allow only roots + system paths.
+  const subpaths = [
+    '/usr', '/System', '/Library', '/bin', '/sbin', '/private/etc', '/private/var',
+    nodeDir,
+    path.join(home, '.claude'),
+    path.join(home, '.config', 'claude'),
+    path.join(home, '.local'),
+    ...new Set(roots),
+  ];
+  const sbpl = [
+    '(version 1)',
+    '(deny default)',
+    '(allow process*)',
+    '(allow sysctl-read)',
+    '(allow mach*)',
+    '(allow network*)',
+    '(allow file-read-metadata)',
+    '(allow file-write* (subpath "/private/tmp") (subpath "/private/var/tmp") ' +
+      `(subpath "${path.join(home, '.claude')}") (subpath "${path.join(home, '.config', 'claude')}"))`,
+    `(allow file-read* ${subpaths.map((p) => `(subpath "${p}")`).join(' ')})`,
+  ].join('\n');
+  return { command: sandbox.bin, args: ['-p', sbpl, command, ...args] };
+}
+
+/** argv for the given engine, with confinement applied (contract §13). */
+export function engineArgv(
+  auto: AutoConfig,
+  launch: EngineLaunch,
+): { command: string; args: string[] } {
   switch (auto.engine) {
     case 'claude': {
+      const { allowed, disallowed } = claudeToolArgs(
+        auto.allowed_tools,
+        launch.roots,
+        launch.sandbox !== null,
+      );
       const args = [
         '-p',
         '--output-format',
@@ -221,7 +435,9 @@ export function engineArgv(auto: AutoConfig): { command: string; args: string[] 
         '--permission-mode',
         'dontAsk',
         '--allowedTools',
-        auto.allowed_tools.join(','),
+        ...allowed,
+        '--disallowedTools',
+        ...disallowed,
         '--max-turns',
         String(auto.max_turns),
         ...(auto.model ? ['--model', auto.model] : []),
@@ -231,15 +447,26 @@ export function engineArgv(auto: AutoConfig): { command: string; args: string[] 
           : []),
         ...auto.extra_args,
       ];
-      return { command: 'claude', args };
+      const base = { command: 'claude', args };
+      return launch.sandbox
+        ? wrapWithSandbox(launch.sandbox, launch.roots, auto.workdir, base.command, base.args)
+        : base;
     }
-    case 'codex':
-      return {
+    case 'codex': {
+      // codex already self-sandboxes (--sandbox read-only); the OS sandbox is
+      // extra defense-in-depth when present.
+      const base = {
         command: 'codex',
         args: ['exec', '--sandbox', 'read-only', '--ask-for-approval', 'never', ...auto.extra_args],
       };
+      return launch.sandbox
+        ? wrapWithSandbox(launch.sandbox, launch.roots, auto.workdir, base.command, base.args)
+        : base;
+    }
     case 'custom':
-      // parseAutoConfig guarantees custom_command is non-empty here.
+      // parseAutoConfig guarantees custom_command is non-empty here. Containment
+      // for a custom engine is the operator's responsibility (documented); we do
+      // NOT force it through the OS sandbox (it may not tolerate the bind set).
       return {
         command: auto.custom_command[0] as string,
         args: [...auto.custom_command.slice(1), ...auto.extra_args],
@@ -262,9 +489,11 @@ export async function runEngine(
     signal: AbortSignal;
     /** Env var names to scrub from the child environment (the bridge token). */
     scrubEnv: string[];
+    /** Resolved roots + detected OS sandbox for filesystem confinement (§13). */
+    launch: EngineLaunch;
   },
 ): Promise<EngineOutcome> {
-  const { command, args } = engineArgv(auto);
+  const { command, args } = engineArgv(auto, opts.launch);
 
   // The engine must never see the bridge token: room content is untrusted
   // input to it, and a prompt-injected engine with the token could act as us.

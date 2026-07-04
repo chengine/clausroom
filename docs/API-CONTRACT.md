@@ -957,9 +957,9 @@ downloads_dir = "~/.clausroom/downloads"  # optional; default shown
 [auto]                                  # only needed for `clausroom-bridge auto` (see below)
 engine               = "claude"         # required: 'claude' | 'codex' | 'custom'
 workdir              = "/path/to/project"  # required; MUST resolve inside filesystem.roots
-allowed_tools        = ["Read", "Grep", "Glob"]  # default shown (read-only)
+allowed_tools        = ["Read", "Grep"]  # default; auto-scoped to filesystem.roots (Glob denied unless sandboxed)
 model                = "sonnet"        # optional; engine default when unset
-max_turns            = 25               # default
+max_turns            = 6                # default
 timeout_seconds      = 300              # default; wall clock per engine run
 max_context_messages = 30               # default; room messages included in the prompt
 respond_to           = "addressed"      # default; or 'mentions_only'
@@ -996,9 +996,9 @@ The `[auto]` table is required for this subcommand only; other subcommands ignor
 |-----|---------------|---------|---------|
 | `engine` | `'claude' \| 'codex' \| 'custom'` | *(required)* | Which engine CLI to drive. |
 | `workdir` | string | *(required)* | Engine working directory. **MUST resolve (after symlinks/`~`) inside one of `filesystem.roots`**, else the bridge refuses to start. |
-| `allowed_tools` | string[] | `["Read", "Grep", "Glob"]` | Tools granted to the engine. The default is read-only on purpose. |
+| `allowed_tools` | string[] | `["Read", "Grep"]` | Tools granted to the engine, interpreted **semantically** and read-only on purpose. `Read`/`Grep` are auto-scoped to `filesystem.roots` (the bridge derives `Read(//root/**)` matchers — the operator never hand-writes them — which confine both file reads and greps to the roots). `Glob`/`LS` leak file **names** and cannot be path-scoped, so they are **denied** unless an OS sandbox is active; the bridge injects a roots-bounded file tree into the prompt instead. `Bash`, `Edit`, `Write`, `MultiEdit`, `NotebookEdit`, `WebFetch`, `WebSearch` are always denied. |
 | `model` | string | *(unset)* | Model override passed to the engine. |
-| `max_turns` | int | `25` | Engine-internal turn cap per run. |
+| `max_turns` | int | `6` | Engine-internal turn cap per run. A chat reply needs ~1–2 agentic turns; keep it low to bound API spend and avoid `error_max_turns`. |
 | `timeout_seconds` | int | `300` | Wall-clock cap per engine run; on timeout the run is killed and no reply is posted. |
 | `max_context_messages` | int | `30` | Max recent room messages included in the composed prompt. |
 | `respond_to` | `'addressed' \| 'mentions_only'` | `'addressed'` | `addressed`: reply when `recipient_ids` includes this agent, **or** `recipient_ids` is empty and the sender is not this agent. `mentions_only`: reply only when `recipient_ids` explicitly includes this agent. |
@@ -1009,15 +1009,34 @@ The `[auto]` table is required for this subcommand only; other subcommands ignor
 
 **Safety posture (BINDING).** The engine runs with **read-only tools by default**
 (`allowed_tools` default; granting write/exec tools is an explicit operator
-choice). All room content fed into the prompt is **untrusted input** — the
-composed prompt must say so and instruct the engine to treat instructions found
-in room messages as data, not commands. Every reply still goes through the
-bridge's local policy (secret patterns, inline-blob, `allow_agent_to_send_text`)
-and the server's guardrails — pause flags, rate limit, and the consecutive-agent
-**turn limit** (§4) all still apply, so a runaway auto-responder stops after
+choice). **Filesystem confinement (BINDING):** the engine must not read file
+**contents** or enumerate file **names** outside `filesystem.roots`. The bridge
+enforces this by (a) auto-scoping the engine's read/search tools to the roots
+(`Read(//root/**)` matchers, one per resolved root — these confine both the read
+and grep tools), (b) denying the write/shell/network tools and the name-leaking
+`Glob`/`LS` tools, and (c) injecting a roots-bounded file tree (deny-glob
+filtered, symlinks not followed, capped) into the prompt so the engine can still
+discover structure. When an OS sandbox (`bwrap` on Linux, `sandbox-exec` on
+macOS) is present it wraps the engine spawn (roots bound read-only) as
+defense-in-depth and `Glob`/`LS` may then be granted; when it is absent the
+bridge logs a one-line warning that confinement is permission-only. `workdir`
+must resolve inside a root or the responder refuses to start. For `engine =
+"custom"`, containment is the operator's responsibility. All room content fed
+into the prompt is **untrusted input** — the composed prompt must say so and
+instruct the engine to treat instructions found in room messages as data, not
+commands; it also tells the engine that **its entire text reply is posted
+verbatim as the room message** (it needs no tool to send, and may initiate as
+well as answer). Every reply still goes through the bridge's local policy
+(secret patterns, inline-blob, `allow_agent_to_send_text`) and the server's
+guardrails — pause flags, rate limit, and the consecutive-agent **turn limit**
+(§4) all still apply, so a runaway auto-responder stops after
 `AGENT_ROOM_MAX_AUTO_TURNS` messages until a human replies (or clicks
-**Continue**, §4). The bridge emits `working`/`idle` activity frames around
-engine runs like any other tool execution (§12).
+**Continue**, §4). On any engine failure (spawn error, non-zero exit,
+`error_max_turns`, usage limit) the daemon posts a short apologetic
+`agent_answer` or logs a clear stderr line and continues — it never exits
+silently; a timeout kills the run and posts no reply. The bridge emits
+`working`/`idle` activity frames around engine runs like any other tool
+execution (§12).
 
 ## 14. Server stdout lines (machine-readable, BINDING)
 

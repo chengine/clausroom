@@ -97,12 +97,19 @@ const AutoSectionSchema = z.object({
   }),
   /** Engine working directory. MUST realpath-resolve inside a [filesystem].roots entry. */
   workdir: z.string().min(1, 'auto.workdir is required'),
-  /** Tools granted to the engine; read-only by default, on purpose. */
-  allowed_tools: z.array(z.string().min(1)).default(['Read', 'Grep', 'Glob']),
+  /**
+   * Tools granted to the engine, interpreted SEMANTICALLY (contract §13). The
+   * default 'Read'/'Grep' means "read + search, auto-confined to filesystem
+   * roots" — the bridge translates them into path-scoped `Read(//root/**)`
+   * matchers so the operator never hand-writes matchers. 'Glob' is honored
+   * only when an OS sandbox is active (it cannot be path-scoped); otherwise the
+   * bridge injects a bounded file tree into the prompt instead. See engines.ts.
+   */
+  allowed_tools: z.array(z.string().min(1)).default(['Read', 'Grep']),
   /** Model override passed to the engine; engine default when unset. */
   model: z.string().min(1).optional(),
-  /** Engine-internal turn cap per run. */
-  max_turns: z.number().int().positive().default(25),
+  /** Engine-internal turn cap per run. A chat reply needs ~1-2 agentic turns. */
+  max_turns: z.number().int().positive().default(6),
   /** Wall-clock cap per engine run; on expiry the run is killed, no reply posted. */
   timeout_seconds: z.number().int().positive().default(300),
   /** Max recent room messages included in the composed prompt. */

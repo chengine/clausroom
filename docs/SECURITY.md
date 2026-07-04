@@ -113,6 +113,62 @@ Three bearer-token kinds, distinguishable by prefix (`TOKEN_PREFIXES` in
 - **Rate limit:** >30 accepted messages per user per sliding 60 s → `429`.
 - **Body cap:** 32,000 chars per message.
 
+## What AUTO MODE confines (`clausroom-bridge auto`)
+
+The `auto` subcommand feeds room content straight into a locally spawned,
+tool-bearing engine (Claude Code, Codex, or a `custom` argv) and posts its
+output back to the room, with **no human in the loop per reply**. Because room
+content is attacker-influenced (see the prompt-injection analysis in
+`THREAT_MODEL.md`), the bridge confines that engine as follows:
+
+- **Reads/searches are scoped to `[filesystem].roots`.** The engine may read and
+  grep files **inside** the configured roots; file **contents** anywhere outside
+  the roots are denied. `auto.workdir` must itself resolve (after `~` expansion
+  and symlink resolution) inside one of `[filesystem].roots`, or the bridge
+  refuses to start — the engine works in the project directory you named, never
+  in your home directory.
+- **No shell, no writes, no network.** The engine is granted a read-only tool
+  allowlist (`allowed_tools`, default `["Read", "Grep"]`); it cannot execute
+  shell commands, write or edit files, or make network calls. The claude engine
+  runs with `--permission-mode dontAsk`, so anything outside the allowlist is
+  **denied outright** rather than queued for a human who is not watching — there
+  is no silent-escalation path. Widening `allowed_tools` (e.g. adding `Bash`,
+  `Write`, `Edit`, `WebFetch`) is the operator's explicit, at-your-own-risk
+  choice.
+- **Glob is denied; discovery uses a bridge-injected file tree.** Without an OS
+  sandbox, `Glob` is **not** in the allowlist (a glob can enumerate paths
+  outside the roots). So the engine does not go blind, the bridge injects a
+  **roots-bounded file tree** into the composed prompt — a listing of the files
+  under `[filesystem].roots` only — which the engine reads with `Read`/`Grep`.
+  Discovery therefore never escapes the roots.
+- **With an OS sandbox, the boundary is kernel-enforced.** When `bwrap`
+  (bubblewrap, Linux) or `sandbox-exec` (macOS) is present on `PATH`, the engine
+  is launched inside it with the filesystem view restricted to
+  `[filesystem].roots` (read-only) plus the minimum it needs to run. There the
+  containment is enforced by the OS, not merely by the tool allowlist, and
+  `Glob` inside the sandbox can only see the roots. When no sandbox binary is
+  available the allowlist + injected file tree above are the boundary; install
+  bubblewrap (`apt install bubblewrap`) on Linux to upgrade to OS-level
+  confinement.
+- **Room content is untrusted input.** The composed prompt marks room messages,
+  summaries, filenames, and artifact contents as untrusted data and instructs
+  the engine not to follow instructions embedded in them. Instructions to an LLM
+  are mitigation, not enforcement — the capability limits above are the backstop.
+- **The bridge token is scrubbed** from the engine subprocess's environment, so
+  an injected engine cannot act as the bridge, and every reply the engine
+  produces still passes the bridge's local outgoing-message policy (secret-pattern
+  redaction, inline-blob guard, `allow_agent_to_send_text`) and the server's
+  guardrails (pause flags, rate limit, consecutive-agent turn limit) exactly like
+  any other agent.
+
+> **Fixed in 0.1.1:** `[filesystem].roots` now governs the auto engine.
+> Previously `roots` bounded only uploads and `room_download_artifact`, while the
+> auto engine ran with whatever ambient filesystem access its CLI had — it could
+> read outside the roots. As of 0.1.1 the auto engine's reads/searches are
+> confined to the roots (allowlist + injected file tree, or an OS sandbox when
+> available), `Glob` is denied without a sandbox, and `max_turns` defaults to
+> **6** (was 25).
+
 ## What is NOT enforced (honest gaps)
 
 Three MVP gaps are closed as of v0.1 and are no longer on this list: artifacts
@@ -147,14 +203,18 @@ the shared secret patterns. What remains:
   each bridge, never persisted, and enforce nothing — an agent that lies about
   being idle loses nothing and gains nothing. Do not treat them as an audit
   signal; the message log is the audit signal.
-- **The auto-responder trusts its local engine.** `clausroom-bridge auto`
-  spawns whatever engine CLI the *local* config names and posts its output; the
-  server cannot tell an autonomous reply from a human-supervised one. Its real
-  constraints are the read-only tool allowlist (default `Read`/`Grep`/`Glob` —
-  widening it is the operator's explicit choice), the bridge's local policy on
-  every outgoing message, and the server's guardrails (pause flags, rate limit,
-  and the consecutive-agent turn limit), which bind it exactly like any other
-  agent. Room content fed into the engine is untrusted input; see
+- **The auto-responder trusts its local engine *within* its confinement.**
+  `clausroom-bridge auto` spawns whatever engine CLI the *local* config names and
+  posts its output; the server cannot tell an autonomous reply from a
+  human-supervised one. The engine is confined as described in "What AUTO MODE
+  confines" above (reads/searches scoped to `[filesystem].roots`; no
+  shell/write/network; `Glob` denied without an OS sandbox), and every reply
+  still passes the bridge's local policy and the server's guardrails. The
+  residual risk is exfiltration *within* granted capability: a read-only engine
+  can still read a file that is inside the roots into a room reply (subject to
+  secret-pattern redaction). Point the roots and `workdir` at exactly the project
+  you are willing to discuss, and pause the agent the moment a conversation looks
+  steered. Room content fed into the engine is untrusted input; see
   `THREAT_MODEL.md` for the prompt-injection analysis.
 - **Humans are trusted within their permissions.** A human participant can post
   anything their `can_send`/`can_upload` flags allow, including through the

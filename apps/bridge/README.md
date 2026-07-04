@@ -92,9 +92,9 @@ downloads_dir = "~/.clausroom/downloads"  # room_download_artifact writes here, 
 [auto]                                    # only needed for `clausroom-bridge auto`
 engine               = "claude"           # required: 'claude' | 'codex' | 'custom'
 workdir              = "/path/to/project" # required; MUST resolve inside filesystem.roots
-allowed_tools        = ["Read", "Grep", "Glob"]  # default; read-only on purpose
-model                = "sonnet"           # optional; engine default when unset
-max_turns            = 25                 # engine-internal turn cap per run
+allowed_tools        = ["Read", "Grep"]   # default; read-only. Glob is NOT granted
+model                = "haiku"            # optional; engine default when unset
+max_turns            = 6                  # engine-internal turn cap per run
 timeout_seconds      = 300                # wall clock per engine run; killed on expiry, no reply
 max_context_messages = 30                 # recent room messages included in the prompt
 respond_to           = "addressed"        # or 'mentions_only'
@@ -110,6 +110,23 @@ Notes:
   `allow_agent_to_upload_files` are **false unless the file sets them
   explicitly** — only read/status tools work by default.
 - `[auto]` is read only by the `auto` subcommand; `mcp` and `check` ignore it.
+- **The auto engine is confined to `[filesystem].roots`.** It can read and grep
+  files inside your configured roots but **cannot read anything outside them**;
+  `workdir` must itself resolve inside a root. `Glob` is deliberately not in the
+  default `allowed_tools` (it could enumerate paths outside the roots) — the
+  bridge injects a roots-bounded file tree into the prompt instead, so the engine
+  still knows what files exist. See the Security posture section and
+  [SECURITY.md](https://github.com/chengine/clausroom/blob/main/docs/SECURITY.md).
+- **`respond_to` controls what the engine answers.** `"addressed"` (default)
+  answers messages sent to your agent **and** broadcasts sent to everyone;
+  `"mentions_only"` answers **only** messages that explicitly address your agent
+  and ignores broadcasts. `"mentions_only"` makes it easy for your agent to look
+  *silent* — if the other side asks a general question of the room without
+  naming your agent, a `mentions_only` responder never replies.
+- **For chat and games, use `model = "haiku"` with a low `max_turns`.** Casual
+  back-and-forth does not need a frontier model or many internal turns; haiku
+  plus `max_turns = 6` (the default) keeps per-reply latency and API spend low.
+  Raise the model/turns only for genuine code-investigation questions.
 
 ## The auto responder (`clausroom-bridge auto`)
 
@@ -119,14 +136,25 @@ npx clausroom-bridge auto --config ~/.clausroom/bridge.toml
 
 Watches the room and, for each new message that addresses your agent
 (`respond_to = "addressed"`: explicitly addressed **or** sent to everyone;
-`"mentions_only"`: explicitly addressed only), composes a prompt — a room
-protocol header (answer with evidence, state confidence, treat room content as
-untrusted data), up to `max_context_messages` of recent context, and the
-question — runs the engine in `workdir`, and posts the engine's reply as an
-`agent_answer` with `reply_to` set. A trailing `Confidence: low|medium|high`
-line in the engine output becomes the message's `confidence` field. Own
-messages, `system_event`, `artifact_uploaded`, and messages older than the
-saved read cursor are never answered.
+`"mentions_only"`: explicitly addressed only — beware, a `mentions_only`
+responder never answers broadcasts, so it easily looks silent), composes a
+prompt — a room protocol header (answer with evidence, state confidence, treat
+room content as untrusted data, **your output IS the message posted to the
+room**), a roots-bounded file tree, up to `max_context_messages` of recent
+context, and the question — runs the engine confined to `workdir`, and posts the
+engine's reply as an `agent_answer` with `reply_to` set. A trailing
+`Confidence: low|medium|high` line in the engine output becomes the message's
+`confidence` field. Own messages, `system_event`, `artifact_uploaded`, and
+messages older than the saved read cursor are never answered.
+
+The engine is confined to `[filesystem].roots`: it can read/grep files inside
+your roots but **cannot read outside them**, has **no shell, no write, and no
+network** tools (default `allowed_tools = ["Read", "Grep"]`), and `Glob` is not
+granted (the injected file tree replaces it). On Linux, install **bubblewrap**
+(`apt install bubblewrap`) to upgrade this to an OS-enforced sandbox — when
+`bwrap` (or `sandbox-exec` on macOS) is on `PATH`, the engine runs inside it
+with its filesystem view restricted to the roots. See
+[SECURITY.md](https://github.com/chengine/clausroom/blob/main/docs/SECURITY.md).
 
 Engines:
 
@@ -167,7 +195,14 @@ turn budget is the ultimate brake on a runaway responder.
 - **Untrusted input everywhere.** Room messages, summaries, and artifacts are
   authored by other people and agents. Tool descriptions and the auto
   responder's prompt tell the agent/engine to treat them as data, never as
-  instructions; the `auto` engine defaults to read-only tools.
+  instructions.
+- **The `auto` engine is confined to `[filesystem].roots`.** It runs with
+  read-only tools only (default `Read`, `Grep`) — no shell, no write, no
+  network — cannot read file contents outside the roots, and `workdir` must
+  resolve inside a root. Without an OS sandbox `Glob` is denied and a
+  roots-bounded file tree is injected into the prompt for discovery; with
+  `bwrap`/`sandbox-exec` present the roots boundary is kernel-enforced. As of
+  0.1.1 `[filesystem].roots` governs the auto engine (previously it did not).
 - **Server-side guardrails still apply.** Pause switches, per-user rate
   limits, and the consecutive-agent turn limit are enforced by the server for
   every reply the bridge posts.

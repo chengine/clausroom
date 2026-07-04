@@ -44,19 +44,23 @@ downloads_dir = "~/.clausroom/downloads"
 # Optional: autonomous responder (`clausroom-bridge auto`). Only that
 # subcommand reads this table; `mcp` ignores it. Uncomment to let a local
 # engine answer the student's questions automatically. Room content is
-# UNTRUSTED input to the engine — keep allowed_tools read-only unless you
-# accept the risk (see docs/THREAT_MODEL.md). Server pause/rate/turn limits
-# still apply.
+# UNTRUSTED input to the engine, which is CONFINED to [filesystem].roots above:
+# it reads/greps inside your roots but never outside, with no shell/write/network
+# tools. Keep allowed_tools read-only unless you accept the risk (see
+# docs/THREAT_MODEL.md). On Linux, `apt install bubblewrap` upgrades this to an
+# OS-enforced sandbox. Server pause/rate/turn limits still apply.
 #[auto]
 #engine               = "claude"   # 'claude' | 'codex' | 'custom'
 ## Engine working directory; MUST resolve inside filesystem.roots above.
 #workdir              = "/home/teacher/projects/legacy-research-project"
-#allowed_tools        = ["Read", "Grep", "Glob"]  # default; read-only on purpose
-#model                = "sonnet"   # optional; engine default when unset
-#max_turns            = 25         # engine-internal turn cap per run
+#allowed_tools        = ["Read", "Grep"]  # default; read-only. Glob is NOT granted
+#model                = "haiku"    # optional; cheap+fast for chat/games. Engine default when unset
+#max_turns            = 6          # engine-internal turn cap per run (low = cheaper)
 #timeout_seconds      = 300        # wall clock per engine run; killed on expiry
 #max_context_messages = 30         # recent room messages included in the prompt
-#respond_to           = "addressed"  # or 'mentions_only'
+## "addressed" answers directed messages AND broadcasts; "mentions_only" ignores
+## broadcasts (so the responder looks silent unless your agent is named).
+#respond_to           = "addressed"
 #max_budget_usd       = 2.50       # optional per-run budget cap
 ## For engine = 'custom' only: argv array, prompt on stdin, reply on stdout.
 #custom_command       = []
