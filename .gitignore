@@ -17,6 +17,13 @@ data/
 .env.*
 !.env.example
 
+# TLS certs / private keys (e.g. from `tailscale cert`) — never commit
+*.key
+*.crt
+*.pem
+*.p12
+*.pfx
+
 # local bridge/agent state
 .clausroom/
 
