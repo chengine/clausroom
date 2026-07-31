@@ -136,6 +136,7 @@ try {
     'host',
   );
   const offer = await waitForLine(host, 'CLAUSROOM_PEER_OFFER');
+  await waitForStderr(host, /gathered ICE candidates: .*host\/TCP=[1-9]\d*/);
 
   join = startPeer(['peer', 'join', ...ICE_ARGS, '--listen-port', '0'], 'join');
   const answerPromise = waitForLine(join, 'CLAUSROOM_PEER_ANSWER');
@@ -144,6 +145,7 @@ try {
   assert.equal(join.exitCode, null);
   join.stdin.write(`${offer}\n`);
   const answer = await answerPromise;
+  await waitForStderr(join, /gathered ICE candidates: .*host\/TCP=[1-9]\d*/);
 
   const hostReadyPromise = waitForLine(host, 'CLAUSROOM_PEER_READY');
   const joinReadyPromise = waitForLine(join, 'CLAUSROOM_PEER_READY');

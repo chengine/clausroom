@@ -37,7 +37,7 @@ const DEFAULT_STUN_URLS = [
 ];
 const SIGNAL_MAX_BYTES = 512 * 1024;
 const ICE_GATHER_TIMEOUT_MS = 30_000;
-const CONNECT_TIMEOUT_MS = 45_000;
+const CONNECT_TIMEOUT_MS = 5 * 60_000;
 const DATA_CHUNK_BYTES = 16 * 1024;
 const CHANNEL_BUFFER_HIGH = 1024 * 1024;
 const CHANNEL_BUFFER_LOW = 256 * 1024;
@@ -315,6 +315,21 @@ function createSignalCollector(pc: PeerConnection): {
   return { candidates, description, complete };
 }
 
+function candidateSummary(candidates: IceCandidate[]): string {
+  const counts = new Map<string, number>();
+  for (const { candidate } of candidates) {
+    const transport = candidate.match(/\s(UDP|TCP)\s/i)?.[1]?.toUpperCase() ?? 'unknown';
+    const type = candidate.match(/\styp\s+([A-Za-z0-9_-]+)/i)?.[1]?.toLowerCase() ?? 'unknown';
+    const key = `${type}/${transport}`;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  if (counts.size === 0) return 'none';
+  return [...counts.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, count]) => `${key}=${count}`)
+    .join(', ');
+}
+
 async function collectSignal(
   pc: PeerConnection,
   collector: ReturnType<typeof createSignalCollector>,
@@ -329,6 +344,7 @@ async function collectSignal(
   if (type !== kind) {
     throw new Error(`WebRTC created ${type}, expected ${kind}`);
   }
+  log(`gathered ICE candidates: ${candidateSummary(collector.candidates)}`);
   const current = pc.localDescription();
   return {
     v: SIGNAL_VERSION,
@@ -580,7 +596,13 @@ function configurePeerLifecycle(pc: PeerConnection): {
     log(`connection state: ${state}`);
     if (state === 'connected') connected.resolve();
     else if (state === 'closed') closed.resolve();
-    else if (state === 'failed') failed.reject(new Error('WebRTC direct connection failed'));
+    else if (state === 'failed') {
+      failed.reject(
+        new Error(
+          'WebRTC direct connection failed: ICE found no usable direct UDP/TCP path; this was not the application timeout',
+        ),
+      );
+    }
   });
   return { connected, closed, failed };
 }
@@ -658,6 +680,7 @@ export async function runPeerHost(options: PeerHostOptions): Promise<void> {
   const session = randomBytes(18).toString('base64url');
   const pc = new rtc.PeerConnection('clausroom-host', {
     iceServers: stunUrls,
+    enableIceTcp: true,
     disableAutoNegotiation: true,
     maxMessageSize: 256 * 1024,
   });
@@ -762,6 +785,7 @@ export async function runPeerJoin(options: PeerJoinOptions): Promise<void> {
   const rtc = await loadRtc();
   const pc = new rtc.PeerConnection('clausroom-join', {
     iceServers: stunUrls,
+    enableIceTcp: true,
     disableAutoNegotiation: true,
     maxMessageSize: 256 * 1024,
   });

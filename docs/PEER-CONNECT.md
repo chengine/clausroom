@@ -127,7 +127,7 @@ npx -y clausroom-bridge peer join
 `http://localhost:<port>`, or IPv6 loopback. The join side always listens only
 on `127.0.0.1`; `--listen-port 0` chooses a free port.
 
-The defaults use the public STUN services
+The defaults try direct UDP and ICE-TCP candidates and use the public STUN services
 `stun:stun.cloudflare.com:3478` and `stun:stun.l.google.com:19302`. To use a
 different discovery service, repeat `--stun`:
 
@@ -153,6 +153,9 @@ and timing metadata but never carries Clausroom content.
   the fingerprints in the manually exchanged SDP and encrypts each WebRTC data
   channel. A small application handshake binds the connection to the generated
   session.
+- **Direct UDP and TCP.** ICE tries both transports. ICE-TCP may temporarily
+  listen on an ephemeral port, but it speaks only authenticated WebRTC; the
+  Clausroom HTTP server and filesystems remain loopback-only.
 - **Direct means direct.** TURN URLs are rejected, and a selected relay
   candidate is refused. `CLAUSROOM_PEER_PATH direct ...` reports the chosen
   candidate pair.
@@ -175,9 +178,11 @@ not a Docker dependency and does not alter the ordinary server/MCP paths.
 
 ## When direct mode cannot connect
 
-Direct ICE is not guaranteed. Symmetric/carrier-grade NAT, outbound UDP blocks,
-VPN routing, or tightly managed institutional firewalls can prevent a usable
-candidate pair. Peer mode times out and fails closed in that case.
+Direct ICE is not guaranteed. Symmetric/carrier-grade NAT, blocked direct UDP
+and TCP, VPN routing, or tightly managed institutional firewalls can prevent a
+usable candidate pair. After a valid answer is pasted, Clausroom allows up to
+five minutes for its own authentication deadline, but the WebRTC engine may
+fail earlier when it has exhausted every candidate pair.
 
 A TURN service would improve success by relaying encrypted traffic, but then a
 hosted data intermediary exists. This implementation intentionally does not
