@@ -59,18 +59,29 @@ interface PeerSignal {
   session: string;
   sdp: string;
   candidates: IceCandidate[];
+  room?: PeerRoomInvite;
+}
+
+export interface PeerRoomInvite {
+  roomId: string;
+  inviteToken: string;
+  bridgeToken: string;
+  humanName: string;
+  agentName: string;
 }
 
 export interface PeerHostOptions {
   target?: string;
   stunUrls?: string[];
   answerFile?: string;
+  roomInvite?: PeerRoomInvite;
 }
 
 export interface PeerJoinOptions {
   offerFile?: string;
   listenPort?: number;
   stunUrls?: string[];
+  onReady?: (details: { localUrl: string; roomInvite?: PeerRoomInvite }) => void | Promise<void>;
 }
 
 interface FixedTarget {
@@ -149,6 +160,37 @@ function encodeSignal(signal: PeerSignal): string {
   return prefix + Buffer.from(JSON.stringify(signal), 'utf8').toString('base64url');
 }
 
+function validRoomInvite(value: unknown): value is PeerRoomInvite {
+  if (typeof value !== 'object' || value === null) return false;
+  const room = value as Partial<PeerRoomInvite>;
+  return (
+    typeof room.roomId === 'string' &&
+    /^room_[0-9a-f]{24}$/.test(room.roomId) &&
+    typeof room.inviteToken === 'string' &&
+    /^arit_[0-9a-f]{32}$/.test(room.inviteToken) &&
+    typeof room.bridgeToken === 'string' &&
+    /^arbt_[0-9a-f]{32}$/.test(room.bridgeToken) &&
+    typeof room.humanName === 'string' &&
+    room.humanName.length > 0 &&
+    room.humanName.length <= 200 &&
+    typeof room.agentName === 'string' &&
+    room.agentName.length > 0 &&
+    room.agentName.length <= 200
+  );
+}
+
+export function decodePeerRoomInvite(encoded: string): PeerRoomInvite {
+  if (encoded.length > 4096) throw new Error('peer room invite context is too large');
+  let value: unknown;
+  try {
+    value = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8'));
+  } catch {
+    throw new Error('invalid peer room invite context encoding');
+  }
+  if (!validRoomInvite(value)) throw new Error('invalid peer room invite context');
+  return value;
+}
+
 function decodeSignal(raw: string, expectedKind: PeerSignal['kind']): PeerSignal {
   const text = raw.trim();
   if (text.length > SIGNAL_MAX_BYTES * 2) {
@@ -198,7 +240,8 @@ function decodeSignal(raw: string, expectedKind: PeerSignal['kind']): PeerSignal
         typeof candidate.mid !== 'string' ||
         candidate.candidate.length > 4096 ||
         candidate.mid.length > 64,
-    )
+    ) ||
+    (signal.room !== undefined && (expectedKind !== 'offer' || !validRoomInvite(signal.room)))
   ) {
     throw new Error(`malformed Clausroom ${expectedKind} candidates`);
   }
@@ -257,6 +300,7 @@ async function collectSignal(
   collector: ReturnType<typeof createSignalCollector>,
   kind: PeerSignal['kind'],
   session: string,
+  room?: PeerRoomInvite,
 ): Promise<PeerSignal> {
   const [{ sdp, type }] = await Promise.all([
     withTimeout(collector.description.promise, ICE_GATHER_TIMEOUT_MS, 'local description'),
@@ -272,6 +316,7 @@ async function collectSignal(
     session,
     sdp: current?.sdp ?? sdp,
     candidates: collector.candidates,
+    ...(kind === 'offer' && room ? { room } : {}),
   };
 }
 
@@ -647,7 +692,13 @@ export async function runPeerHost(options: PeerHostOptions): Promise<void> {
   const uninstallShutdown = installShutdown(pc);
   try {
     pc.setLocalDescription('offer');
-    const offer = await collectSignal(pc, signalCollector, 'offer', session);
+    const offer = await collectSignal(
+      pc,
+      signalCollector,
+      'offer',
+      session,
+      options.roomInvite,
+    );
     log(`fixed host target: ${target.display} (loopback only)`);
     log(
       stunUrls.length === 0
@@ -792,6 +843,7 @@ export async function runPeerJoin(options: PeerJoinOptions): Promise<void> {
     const localUrl = `http://127.0.0.1:${address.port}`;
     machineLine('CLAUSROOM_PEER_READY', localUrl);
     log(`local-only Clausroom URL: ${localUrl}`);
+    await options.onReady?.({ localUrl, roomInvite: offer.room });
     log('leave this command running while the room is in use');
 
     await Promise.race([lifecycle.closed.promise, lifecycle.failed.promise]);

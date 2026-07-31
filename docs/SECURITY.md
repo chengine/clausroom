@@ -19,7 +19,7 @@ Layers referenced below:
 
 | # | Invariant | Enforced by |
 |---|-----------|-------------|
-| 1 | Do not invite the collaborator into your whole tailnet | **Tailscale mode:** use device sharing of the server machine only. **Peer mode:** no tailnet membership exists; a manually exchanged, ephemeral WebRTC description authorizes one peer session. |
+| 1 | Do not invite the collaborator into your whole tailnet | **Tailscale mode:** use device sharing of the server machine only. **Peer mode:** no tailnet membership exists; a manually exchanged WebRTC offer carries one intended participant's room-scoped credentials and authorizes one peer session. |
 | 2 | Do not host the chatroom on your main personal laptop if avoidable | **Deploy**: `deploy/Dockerfile` + `docker-compose.yml` run the server as a non-root user in a container whose only writable mount is `./data:/data` — no home directory, no repo. The systemd unit adds `ProtectHome=read-only`. |
 | 3 | The collaborator reaches only the chatroom server, only one port | **Tailscale:** grants allow `tcp:443` only and Serve terminates TLS. **Peer:** Clausroom itself stays on `127.0.0.1`; the authenticated host tunnel accepts only the Clausroom data-channel protocol and maps it to one fixed, validated loopback target. It cannot select SSH, a network filesystem, or another address. |
 | 4 | The host machine never initiates arbitrary connections into the guest's machine | **Architecture**: normal bridges are outbound HTTP/WSS clients. In peer mode both sides explicitly participate in ICE and exchange packets only inside the authenticated WebRTC session; the guest exposes only a `127.0.0.1` proxy to its own browser/bridge. There is no general server→guest connection primitive. |
@@ -41,10 +41,12 @@ Three bearer-token kinds, distinguishable by prefix (`TOKEN_PREFIXES` in
 | session | `arst_` | human browser | all human REST/WS calls |
 | bridge | `arbt_` | local bridge process | bound to one `(user, room)` pair |
 
-- **Hash-only storage.** The server persists only `sha256(token)` in
-  `tokens.token_hash`. A raw token appears exactly once: in the API response (or
-  the `CLAUSROOM_BOOTSTRAP_INVITE` stdout line) that mints it. A database or
-  transcript leak does not leak usable credentials.
+- **Hash-only server storage.** The server persists only `sha256(token)` in
+  `tokens.token_hash` and returns a raw token only in the minting API response
+  (or bootstrap stdout). The streamlined host immediately places the intended
+  guest's returned tokens into the private combined offer; they are not put in
+  the database or transcript. A database or transcript leak therefore does not
+  leak usable credentials.
 - **Prefixes make leaks greppable** and let the server reject a bridge token used
   as a session token (and vice versa) before any lookup.
 - **Single-use invites.** `tokens.used_at` is set at login; reuse → `401`.
@@ -54,8 +56,13 @@ Three bearer-token kinds, distinguishable by prefix (`TOKEN_PREFIXES` in
   humans including their session tokens — and mints a fresh one. A token is valid
   iff `revoked_at IS NULL` (and, for invites, `used_at IS NULL`); revocation takes
   effect on the next request.
-- Bridge tokens are never written to config files: `bridge.toml` names an
-  environment variable (`token_env`, default `AGENT_ROOM_BRIDGE_TOKEN`).
+- Bridge tokens are never written to `bridge.toml` or coding-agent MCP
+  configuration. In the hand-configured flow, the token comes from an
+  environment variable (`token_env`, default `AGENT_ROOM_BRIDGE_TOKEN`). In the
+  streamlined `host`/`connect` flow, it lives in
+  `~/.clausroom/active-room.json` with mode 0600 while the owning process is
+  alive and is injected only into the MCP subprocess; normal shutdown removes
+  the file and stale-PID checks reject a record left by a crash.
 - **Owner-lockout recovery.** Session TTL expiry could otherwise brick a
   deployment: minting a fresh invite requires an authenticated owner session —
   exactly what an idle owner just lost. On startup, if an **admin human** (the
@@ -135,9 +142,11 @@ the shared secret patterns. What remains:
   prevent a path. TURN would improve connectivity by relaying traffic, but peer
   mode rejects TURN and fails closed to preserve the no-data-intermediary model.
 - **Manual signaling is a capability exchange.** Offer/answer codes include
-  ephemeral candidates and fingerprints. A person who receives and completes
-  the exchange is being authorized for that peer session; use a trusted private
-  channel and restart if a code is misdirected.
+  ephemeral candidates and fingerprints. A streamlined offer additionally
+  contains the guest's single-use browser invite and room-bound bridge token.
+  A person who receives it can attempt to join as that participant; use a
+  trusted private channel and create a new room/credentials if it is
+  misdirected.
 - **Message redaction is best-effort pattern matching.** Message bodies and
   the pinned room summary are scanned against `SECRET_CONTENT_PATTERNS` plus
   the clausroom token pattern (`arit_/arst_/arbt_` + 32 hex) and matches

@@ -5,14 +5,16 @@ import { Login } from './components/Login.js';
 import { RoomsHome } from './components/RoomsHome.js';
 import { RoomView } from './components/RoomView.js';
 import { Wordmark } from './components/Wordmark.js';
-import { getSessionToken, setSessionToken } from './storage.js';
+import { consumeSessionFragment, getSessionToken, setSessionToken } from './storage.js';
 
 type View = { name: 'login' } | { name: 'rooms' } | { name: 'room'; roomId: string };
 
 export function App() {
-  const [token, setToken] = useState<string | null>(() => getSessionToken());
+  const [token, setToken] = useState<string | null>(
+    () => consumeSessionFragment() ?? getSessionToken(),
+  );
   const [me, setMe] = useState<User | null>(null);
-  const [view, setView] = useState<View>(() => (getSessionToken() ? { name: 'rooms' } : { name: 'login' }));
+  const [view, setView] = useState<View>(() => (token ? { name: 'rooms' } : { name: 'login' }));
   const [bootError, setBootError] = useState<string | null>(null);
   const [bootAttempt, setBootAttempt] = useState(0);
   // Shown on the login screen after an involuntary sign-out (session expiry).

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * clausroom-bridge CLI.
+ * clausroom CLI.
  *
  * Subcommands:
  *   mcp   --config <path>   Run the stdio MCP server for the local coding agent.
@@ -12,8 +12,9 @@
  *                           messages addressed to this agent by driving a
  *                           local engine (claude | codex [EXPERIMENTAL] |
  *                           custom) per the [auto] section of bridge.toml.
- *   peer host|join           Direct WebRTC tunnel with manual offer/answer
- *                           signaling and a loopback-only TCP boundary.
+ *   host / connect           Streamlined direct WebRTC room commands.
+ *   project                  Attach only the current directory to the active room.
+ *   peer host|join           Low-level direct WebRTC tunnel commands.
  */
 
 import { Command } from 'commander';
@@ -95,12 +96,133 @@ async function runCheck(configPath: string | undefined): Promise<number> {
 const program = new Command();
 
 program
-  .name('clausroom-bridge')
+  .name('clausroom')
   .description(
     'clausroom local bridge: MCP room tools, an autonomous responder, and an ' +
       'optional direct-only WebRTC peer transport with loopback boundaries.',
   )
   .version('0.1.0');
+
+program
+  .command('host')
+  .description(
+    'Start a secure direct room from any directory, locally or through an SSH local forward.',
+  )
+  .option('--ssh <target>', 'run the Clausroom source checkout on [user@]host')
+  .option('--repo <path>', 'local Clausroom source checkout')
+  .option('--remote-dir <path>', 'remote source checkout (default: ~/StanfordMSL/clausroom)')
+  .option('--local-port <port>', 'SSH-forwarded loopback browser port', (value) => Number(value), 43000)
+  .option('--server-port <port>', 'host loopback server port', (value) => Number(value), 3000)
+  .option('--room-name <name>', 'room display name')
+  .option('--host-name <name>', 'host participant display name')
+  .option('--guest-name <name>', 'guest participant display name')
+  .option('--skip-setup', 'skip npm install and npm run build')
+  .option('--no-stun', 'disable STUN and try host candidates only')
+  .option('--no-open', 'do not open the local browser automatically')
+  .action(
+    async (opts: {
+      ssh?: string;
+      repo?: string;
+      remoteDir?: string;
+      localPort?: number;
+      serverPort?: number;
+      roomName?: string;
+      hostName?: string;
+      guestName?: string;
+      skipSetup?: boolean;
+      stun?: boolean;
+      open?: boolean;
+    }) => {
+      try {
+        const { runHostCommand } = await import('./convenience.js');
+        await runHostCommand(opts);
+      } catch (err) {
+        process.stderr.write(`host failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        process.exitCode = 1;
+      }
+    },
+  );
+
+program
+  .command('connect')
+  .description(
+    'Paste a combined room offer, create a direct encrypted connection, and open the local UI.',
+  )
+  .option('--offer-file <path>', 'read the combined offer from a file')
+  .option('--listen-port <port>', 'local-only browser proxy port; 0 chooses a free port', (value) => Number(value), 0)
+  .option('--stun <url>', 'STUN discovery URL (repeatable)', (value, previous?: string[]) => [
+    ...(previous ?? []),
+    value,
+  ])
+  .option('--no-stun', 'disable STUN and try host candidates only')
+  .option('--no-open', 'do not open the browser automatically')
+  .action(
+    async (opts: {
+      offerFile?: string;
+      listenPort?: number;
+      stun?: string[] | boolean;
+      open?: boolean;
+    }) => {
+      try {
+        const { runConnectCommand } = await import('./convenience.js');
+        await runConnectCommand({
+          offerFile: opts.offerFile,
+          listenPort: opts.listenPort,
+          stunUrls: opts.stun === false ? [] : Array.isArray(opts.stun) ? opts.stun : undefined,
+          open: opts.open,
+        });
+      } catch (err) {
+        process.stderr.write(`connect failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        process.exitCode = 1;
+      }
+    },
+  );
+
+program
+  .command('project')
+  .description(
+    'Attach the active room to a coding agent, limiting Clausroom file access to the current directory.',
+  )
+  .option('--agent <agent>', 'coding agent to configure: codex, claude, or none', (value) => {
+    if (value !== 'codex' && value !== 'claude' && value !== 'none') {
+      throw new Error('--agent must be codex, claude, or none');
+    }
+    return value;
+  }, 'codex')
+  .option(
+    '--allow-agent-uploads',
+    'allow the agent to propose files from this project (human approval is still required)',
+  )
+  .action(
+    async (opts: {
+      agent: 'codex' | 'claude' | 'none';
+      allowAgentUploads?: boolean;
+    }) => {
+      try {
+        const { runProjectCommand } = await import('./convenience.js');
+        await runProjectCommand(opts);
+      } catch (err) {
+        process.stderr.write(`project failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        process.exitCode = 1;
+      }
+    },
+  );
+
+program
+  .command('project-mcp', { hidden: true })
+  .description('Internal stdio MCP launcher for `clausroom project`.')
+  .requiredOption('-c, --config <path>', 'generated project bridge config')
+  .action(async (opts: { config: string }) => {
+    try {
+      const { runProjectMcp } = await import('./convenience.js');
+      await runProjectMcp(opts.config);
+    } catch (err) {
+      process.stderr.write(
+        `project bridge startup failed: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+      process.exit(1);
+    }
+  });
 
 program
   .command('mcp')
@@ -182,11 +304,13 @@ peer
       answerFile?: string;
     }) => {
       try {
-        const { runPeerHost } = await import('./peer.js');
+        const { decodePeerRoomInvite, runPeerHost } = await import('./peer.js');
+        const encodedRoomInvite = process.env.CLAUSROOM_PEER_ROOM_INVITE;
         await runPeerHost({
           target: opts.target,
           stunUrls: opts.stun === false ? [] : Array.isArray(opts.stun) ? opts.stun : undefined,
           answerFile: opts.answerFile,
+          roomInvite: encodedRoomInvite ? decodePeerRoomInvite(encodedRoomInvite) : undefined,
         });
       } catch (err) {
         process.stderr.write(

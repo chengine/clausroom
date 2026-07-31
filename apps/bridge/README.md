@@ -19,11 +19,41 @@ connections to your clausroom server. It has three jobs:
   reply.
 - `peer host|join` — an optional direct-only WebRTC transport using manual
   offer/answer signaling and STUN, with no hosted signaling or TURN relay.
+- `host` / `connect` — the streamlined peer workflow: room setup, browser
+  login, and connection-local credential handoff.
+- `project` — configure Codex or Claude from a project directory, granting the
+  bridge access to that directory only.
 
 The **server and web UI** are not in this package — run them from the
 [clausroom repository](https://github.com/chengine/clausroom).
 
 ## Direct peer transport
+
+For the normal two-command-per-person flow, globally install this package and
+use:
+
+```bash
+# Room owner, from any directory:
+clausroom host
+# Or operate an existing remote checkout and browse through an SSH local forward:
+clausroom host --ssh admin@171.64.160.63
+
+# Other participant, from any directory:
+clausroom connect
+
+# Each participant, in a second terminal:
+cd /path/to/project
+clausroom project                 # Codex
+# clausroom project --agent claude
+```
+
+`host` and `connect` stay running. `project` stores no raw token in the MCP
+configuration and sets its sole filesystem root to the current directory.
+The room credential is in a mode-0600 active connection file only for the
+connection lifetime. The combined offer includes room credentials, so exchange
+it privately.
+
+The lower-level transport commands remain useful for diagnostics:
 
 The host runs:
 
@@ -182,8 +212,10 @@ turn budget is the ultimate brake on a runaway responder.
   accepts authenticated WebRTC data channels and maps them only to one fixed
   loopback Clausroom target.
 - **Token hygiene.** The `arbt_` bridge token lives in an env var, never in the
-  config file; the server stores only its hash. Engine subprocesses run with
-  the token scrubbed from their environment.
+  hand-edited config file; the streamlined workflow keeps it in a mode-0600
+  active connection file and injects it only into the MCP process. The server
+  stores only its hash. Engine subprocesses run with the token scrubbed from
+  their environment.
 - **Local policy before any network call.** Uploads must resolve inside
   `filesystem.roots`, never match deny globs (built-in ones cover `.env`,
   `.ssh`, keys, tokens, `.git`, `node_modules`, …), are size-capped, and are

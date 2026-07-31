@@ -32,37 +32,63 @@ listener.
 
 ## Recommended setup
 
-On the host:
+Install the global command once on each machine. From this source checkout:
 
 ```bash
-npm install
-npm run build
-npm run up -- --peer
+npm run install:cli
 ```
 
-After the launcher creates the room, it prints one long line beginning with
-`CLAUSROOM_PEER_OFFER`. Send the complete line privately to the guest.
-
-On the guest:
+The host can launch from any directory:
 
 ```bash
-npx -y clausroom-bridge peer join
+clausroom host
+```
+
+If the host server is a machine you normally SSH into, launch it from the
+laptop where you want the browser:
+
+```bash
+clausroom host --ssh admin@171.64.160.63
+```
+
+The SSH form uses a loopback-only local forward (default laptop port 43000) and
+the remote source checkout at `~/StanfordMSL/clausroom`. Override it with
+`--remote-dir`; use `--skip-setup` to omit the otherwise automatic
+`npm install` and `npm run build`.
+
+After room creation, the command prints one long line beginning with
+`CLAUSROOM_PEER_OFFER`. Send the complete line privately. The guest can launch
+from any directory:
+
+```bash
+clausroom connect
 ```
 
 Paste the offer when prompted. Send the resulting
 `CLAUSROOM_PEER_ANSWER ...` line privately to the host, who pastes it into the
 still-running host command.
 
-When ICE and peer authentication succeed, the guest sees:
+When ICE and peer authentication succeed, each person's browser opens against
+a loopback URL. Both commands stay running. In a second terminal, each person
+runs:
 
-```text
-CLAUSROOM_PEER_PATH direct ...
-CLAUSROOM_PEER_READY http://127.0.0.1:49152
+```bash
+cd /path/to/the/project
+clausroom project                 # configures Codex
+# or: clausroom project --agent claude
 ```
 
-The port is an example and normally changes each run. The guest opens that
-loopback URL in a browser and uses the same URL as `room.server_url` in
-`bridge.toml`. Leave both peer commands running while using the room.
+`project` uses the current directory as the only filesystem root, defaults
+agent uploads to off, and writes a credential-free MCP configuration. It reads
+the room-scoped token from `~/.clausroom/active-room.json`, which is mode 0600,
+owned by the running `host`/`connect` command, and removed at shutdown. Browser
+session tokens travel in a URL fragment (not an HTTP request) and the UI removes
+the fragment immediately after storing it locally.
+
+The offer contains ephemeral connection information plus the guest's one-time
+browser invite and room-scoped bridge credential. Anyone who obtains it before
+the intended guest can attempt to join, so it must be treated as a private
+bearer invitation. The answer is session-bound and must also be private.
 
 ## Running the tunnel separately
 
@@ -117,9 +143,10 @@ and timing metadata but never carries Clausroom content.
   local coding-agent bridges under each side's configured filesystem policy.
 
 The offer and answer contain ephemeral ICE candidates, DTLS fingerprints, and
-session data. Treat them as one-session capability material: exchange them
-privately, do not post them publicly, and restart both commands if either code
-is sent to the wrong person.
+session data; the streamlined offer also contains the intended guest's
+room-scoped credentials. Treat them as one-session capability material:
+exchange them privately, do not post them publicly, and restart the host with a
+new room if the offer is sent to the wrong person.
 
 `node-datachannel` is the peer command's platform-specific WebRTC runtime. It is
 an optional dependency and is loaded only for `peer host` or `peer join`; it is
@@ -149,6 +176,7 @@ and response bodies:
 
 ```bash
 npm run smoke:peer
+npm run smoke:convenience
 ```
 
 For a live session, check all of the following:

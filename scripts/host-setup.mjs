@@ -362,15 +362,27 @@ async function startServer(envOverrides = {}) {
       15_000,
     );
     rl.on('line', (line) => {
-      process.stderr.write(`[server] ${line}\n`);
       let m;
-      if ((m = line.match(/^CLAUSROOM_BOOTSTRAP_INVITE (arit_[0-9a-f]{32})$/))) result.invite = m[1];
-      else if ((m = line.match(/^CLAUSROOM_RECOVERY_INVITE (arit_[0-9a-f]{32})$/))) result.recovery = m[1];
-      else if ((m = line.match(/^CLAUSROOM_LISTENING (\d+)$/))) {
+      if ((m = line.match(/^CLAUSROOM_BOOTSTRAP_INVITE (arit_[0-9a-f]{32})$/))) {
+        result.invite = m[1];
+        process.stderr.write(
+          isEnvTrue(process.env.CLAUSROOM_CLI_CONTEXT)
+            ? '[server] CLAUSROOM_BOOTSTRAP_INVITE [consumed internally]\n'
+            : `[server] ${line}\n`,
+        );
+      } else if ((m = line.match(/^CLAUSROOM_RECOVERY_INVITE (arit_[0-9a-f]{32})$/))) {
+        result.recovery = m[1];
+        process.stderr.write(
+          isEnvTrue(process.env.CLAUSROOM_CLI_CONTEXT)
+            ? '[server] CLAUSROOM_RECOVERY_INVITE [consumed internally]\n'
+            : `[server] ${line}\n`,
+        );
+      } else if ((m = line.match(/^CLAUSROOM_LISTENING (\d+)$/))) {
+        process.stderr.write(`[server] ${line}\n`);
         result.port = Number(m[1]);
         clearTimeout(timer);
         resolve();
-      }
+      } else process.stderr.write(`[server] ${line}\n`);
     });
     proc.on('exit', (code) => {
       clearTimeout(timer);
@@ -921,6 +933,7 @@ async function runUp(flags) {
   const noServe = Boolean(flags['no-serve']);
   const noOpen = Boolean(flags['no-open']);
   const peerMode = Boolean(flags.peer);
+  const cliContextMode = isEnvTrue(process.env.CLAUSROOM_CLI_CONTEXT);
   upPeerMode = peerMode;
 
   info('clausroom — npm run up');
@@ -1057,6 +1070,13 @@ async function runUp(flags) {
         studentAgentName,
         teacherAgentName,
       });
+    const peerRoomInvite = {
+      roomId: room.id,
+      inviteToken: teacherInvite,
+      bridgeToken: teacherBridgeToken,
+      humanName: teacherName,
+      agentName: teacherAgentName,
+    };
 
     if (rl) rl.close();
 
@@ -1072,72 +1092,87 @@ async function runUp(flags) {
       roomUrlHint: servedPublicly ? roomUrl : null,
     });
 
-    out('');
-    out('########################################################################');
-    out('# clausroom is UP');
-    out('########################################################################');
-    out('');
-    out(`Room URL: ${roomUrl}`);
-    out('');
-    out(
-      (peerMode ? peerTeacherOnboarding : teacherOnboarding)({
-        teacherName,
-        studentName,
-        projectName,
-        roomUrl,
-        inviteToken: teacherInvite,
-        bridgeToken: teacherBridgeToken,
+    if (cliContextMode) {
+      const context = {
+        v: 1,
+        sessionToken,
+        serverUrl: baseUrl,
         roomId: room.id,
-        repoUrl,
-        tokenEnv,
-        configPath,
-      }),
-    );
-    out('');
-    out('########################################################################');
-    out('# STUDENT (you) — your own bridge.toml, token, and attach line');
-    out('########################################################################');
-    out('');
-    out(`# 1. Save this as ${configPath} (edit [filesystem] roots to your project):`);
-    out('# ----- begin bridge.toml -----');
-    out(bridgeToml);
-    out('# ----- end bridge.toml -----');
-    out('');
-    out('# 2. Export your bridge token (shown ONCE — keep it safe):');
-    out(`export ${tokenEnv}="${studentBridgeToken}"`);
-    out('');
-    out('# 3. Register the bridge with Claude Code:');
-    out(mcpAddLine(tokenEnv, configPath));
-    out('');
-    if (peerMode) {
-      out('########################################################################');
-      out('# DIRECT PEER EXCHANGE');
-      out('########################################################################');
-      out('');
-      out('# The host offer will print below. Send it privately to the teacher. They run');
-      out('# `npx -y clausroom-bridge peer join`, paste it, and send their answer back.');
-      out('# Paste that answer into this terminal. No SSH keys, certificate, public TCP');
-      out('# listener, router port-forward, or filesystem mount is involved.');
-      out('');
+        bridgeToken: studentBridgeToken,
+        humanName: studentName,
+        agentName: studentAgentName,
+      };
+      out(`CLAUSROOM_HOST_CONTEXT ${Buffer.from(JSON.stringify(context), 'utf8').toString('base64url')}`);
     } else {
+      out('');
       out('########################################################################');
-      out('# ONE REMAINING MANUAL STEP — share the host with the teacher');
-      out('#   (Tailscale has NO CLI for device sharing; do this in the admin console)');
+      out('# clausroom is UP');
       out('########################################################################');
       out('');
-      out(`#  1. Open the Tailscale admin console:  ${TAILSCALE_ADMIN_URL}`);
-      out('#  2. Find the clausroom host machine, open its "..." menu -> Share...,');
-      out('#     then Copy share link and send that link to the teacher.');
-      out('#  3. Open the ACL editor (Access Controls) and paste');
-      out('#     deploy/tailscale-policy.hujson so the guest reaches ONLY tcp:443');
-      out('#     on this one machine.');
+      out(`Room URL: ${roomUrl}`);
       out('');
+      out(
+        (peerMode ? peerTeacherOnboarding : teacherOnboarding)({
+          teacherName,
+          studentName,
+          projectName,
+          roomUrl,
+          inviteToken: teacherInvite,
+          bridgeToken: teacherBridgeToken,
+          roomId: room.id,
+          repoUrl,
+          tokenEnv,
+          configPath,
+        }),
+      );
+      out('');
+      out('########################################################################');
+      out('# STUDENT (you) — your own bridge.toml, token, and attach line');
+      out('########################################################################');
+      out('');
+      out(`# 1. Save this as ${configPath} (edit [filesystem] roots to your project):`);
+      out('# ----- begin bridge.toml -----');
+      out(bridgeToml);
+      out('# ----- end bridge.toml -----');
+      out('');
+      out('# 2. Export your bridge token (shown ONCE — keep it safe):');
+      out(`export ${tokenEnv}="${studentBridgeToken}"`);
+      out('');
+      out('# 3. Register the bridge with Claude Code:');
+      out(mcpAddLine(tokenEnv, configPath));
+      out('');
+      if (peerMode) {
+        out('########################################################################');
+        out('# DIRECT PEER EXCHANGE');
+        out('########################################################################');
+        out('');
+        out('# The host offer will print below. Send it privately to the teacher. They run');
+        out('# `npx -y clausroom-bridge peer join`, paste it, and send their answer back.');
+        out('# Paste that answer into this terminal. No SSH keys, certificate, public TCP');
+        out('# listener, router port-forward, or filesystem mount is involved.');
+        out('');
+      } else {
+        out('########################################################################');
+        out('# ONE REMAINING MANUAL STEP — share the host with the teacher');
+        out('#   (Tailscale has NO CLI for device sharing; do this in the admin console)');
+        out('########################################################################');
+        out('');
+        out(`#  1. Open the Tailscale admin console:  ${TAILSCALE_ADMIN_URL}`);
+        out('#  2. Find the clausroom host machine, open its "..." menu -> Share...,');
+        out('#     then Copy share link and send that link to the teacher.');
+        out('#  3. Open the ACL editor (Access Controls) and paste');
+        out('#     deploy/tailscale-policy.hujson so the guest reaches ONLY tcp:443');
+        out('#     on this one machine.');
+        out('');
+      }
     }
 
     // --- reminders (stderr) ---------------------------------------------
-    info('');
-    info('[host-setup] REMINDER: every token above is shown exactly ONCE — the server');
-    info('[host-setup] stores only SHA-256 hashes. Copy them now.');
+    if (!cliContextMode) {
+      info('');
+      info('[host-setup] REMINDER: every token above is shown exactly ONCE — the server');
+      info('[host-setup] stores only SHA-256 hashes. Copy them now.');
+    }
     if (!peerMode && !servedPublicly && !noServe) {
       info('[host-setup] NOTE: tailscale serve did not run, so the URL above is loopback-only.');
       info(`[host-setup]       Expose it later with:  ${manualServeLine}`);
@@ -1166,6 +1201,13 @@ async function runUp(flags) {
       info('[host-setup] starting the direct peer exchange...');
       peerProc = spawn(process.execPath, peerArgs, {
         stdio: ['inherit', 'pipe', 'inherit'],
+        env: {
+          ...process.env,
+          CLAUSROOM_PEER_ROOM_INVITE: Buffer.from(
+            JSON.stringify(peerRoomInvite),
+            'utf8',
+          ).toString('base64url'),
+        },
       });
       const ready = new Promise((resolve, reject) => {
         const lines = readline.createInterface({ input: peerProc.stdout });

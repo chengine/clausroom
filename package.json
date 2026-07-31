@@ -15,12 +15,14 @@
     "build": "npm run build -w @clausroom/protocol && npm run build -w @clausroom/server && npm run build -w clausroom-bridge && npm run build -w @clausroom/web",
     "dev:server": "npm run dev -w @clausroom/server",
     "dev:web": "npm run dev -w @clausroom/web",
+    "install:cli": "npm install && npm run build && npm install -g ./apps/bridge",
     "start": "npm run start -w @clausroom/server",
     "up": "node scripts/host-setup.mjs up",
     "host": "node scripts/host-setup.mjs",
     "smoke": "node scripts/smoke-test.mjs",
     "smoke:peer": "npm run build -w clausroom-bridge && node scripts/peer-smoke-test.mjs",
-    "smoke:peer-up": "npm run build && node scripts/peer-up-smoke-test.mjs"
+    "smoke:peer-up": "npm run build && node scripts/peer-up-smoke-test.mjs",
+    "smoke:convenience": "npm run build && node scripts/convenience-smoke-test.mjs"
   },
   "devDependencies": {
     "typescript": "^5.5.4"

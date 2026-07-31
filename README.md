@@ -200,24 +200,67 @@ settings come from the same `AGENT_ROOM_*` env vars as `npm start` (e.g.
 
 ### Direct WebRTC peer path — no Tailscale or public server port
 
-The host runs:
+Install the `clausroom` command once. From a source checkout:
 
 ```bash
-npm run up -- --peer
+npm run install:cli
 ```
 
-It prints a `CLAUSROOM_PEER_OFFER`. Send that line privately to the guest. The
-guest runs:
+Once the npm package is published, a machine that does not need the server
+source can instead use `npm install -g clausroom-bridge`.
+
+The host command can run from any directory. If you are on the server machine:
 
 ```bash
-npx -y clausroom-bridge peer join
+clausroom host
+```
+
+If the server is a machine you normally SSH into, run this on your laptop:
+
+```bash
+clausroom host --ssh admin@171.64.160.63
+```
+
+That keeps the server loopback-only, creates an SSH **local** forward for the
+host's laptop browser, runs the remote checkout at
+`~/StanfordMSL/clausroom`, and performs `npm install` plus `npm run build`
+before launch. Pass `--remote-dir /another/path` when needed, or
+`--skip-setup` after a known-good build.
+
+The host sends the printed `CLAUSROOM_PEER_OFFER` privately. From any directory,
+the other person runs:
+
+```bash
+clausroom connect
 ```
 
 The guest pastes the offer and sends the resulting `CLAUSROOM_PEER_ANSWER` back.
-The host pastes that answer. Once connected, the guest opens the
-`CLAUSROOM_PEER_READY http://127.0.0.1:...` URL and uses the same local URL in
-their `bridge.toml`. Leave both commands running. Full setup and the precise
-security/failure boundary are in [docs/PEER-CONNECT.md](docs/PEER-CONNECT.md).
+The host pastes that answer. Each command opens that person's local browser and
+stays running.
+
+Finally, each person opens a second terminal in the project their agent may
+access:
+
+```bash
+cd /path/to/project
+clausroom project                 # Codex
+# or: clausroom project --agent claude
+```
+
+This generated MCP configuration contains no token and names exactly the
+current directory as its sole filesystem root. The active room credential is
+held in `~/.clausroom/active-room.json` with mode 0600 only while
+`host`/`connect` is running. Agent uploads are disabled unless
+`--allow-agent-uploads` is passed; the existing human-approval gates still
+apply when enabled.
+
+The combined offer is a bearer invitation: it now contains the guest's
+single-use browser invite and room-scoped agent credential as well as ICE
+connection information. Send it only to the intended participant. Full setup
+and the precise security/failure boundary are in
+[docs/PEER-CONNECT.md](docs/PEER-CONNECT.md). The lower-level
+`npm run up -- --peer` and `clausroom peer host|join` commands remain available
+for debugging.
 
 <details>
 <summary><strong>Alternative — <code>npm start</code> + <code>npm run host</code> (manual, multi-step)</strong></summary>
@@ -507,7 +550,8 @@ scripts/
   smoke-test.mjs                       # `npm run smoke`
 ```
 
-Root scripts: `npm run up` (one-command host launch: server + Tailscale Serve +
-room + onboarding, then stays up), `npm run host` (guided host-setup wizard),
-`npm run build` (all workspaces), `npm start` (server), `npm run dev:server`,
-`npm run dev:web`, `npm run smoke`.
+Root scripts: `npm run install:cli` (build and install the directory-independent
+`clausroom` command), `npm run up` (server + Tailscale Serve + room +
+onboarding), `npm run host` (guided host-setup wizard), `npm run build` (all
+workspaces), `npm start` (server), `npm run dev:server`, `npm run dev:web`,
+`npm run smoke`.

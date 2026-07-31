@@ -5,6 +5,7 @@
   "description": "clausroom local bridge: MCP room tools, autonomous responder, and optional direct WebRTC peer transport.",
   "license": "MIT",
   "bin": {
+    "clausroom": "dist-npm/cli.mjs",
     "clausroom-bridge": "dist-npm/cli.mjs"
   },
   "files": [
