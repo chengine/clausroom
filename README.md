@@ -501,24 +501,28 @@ From the spec's access-boundary table (`docs/SECURITY.md` and
 
 Yes. The headless machine remains the actual Clausroom host: it runs the
 server, database, artifact store, WebRTC peer, project, and coding agent. Your
-laptop runs only the SSH controller/local forward and browser.
+laptop needs only its normal SSH client and browser; Clausroom does not need to
+be installed there.
 
-Install the `clausroom` command on your laptop once, then run this from any
-local directory:
+From the laptop, open an SSH session with a loopback-only local forward:
 
 ```bash
-clausroom host --ssh admin@171.64.160.63
+ssh -L 127.0.0.1:3000:127.0.0.1:3000 admin@171.64.160.63
 ```
 
-This starts Clausroom in the remote checkout at
-`~/StanfordMSL/clausroom`, forwards laptop
-`127.0.0.1:43000` to the host's loopback-only server, and opens the UI in the
-laptop browser. It also performs the remote dependency install, build, and
-global CLI install. Use `--remote-dir /another/path` when necessary, or
-`--skip-setup` after a known-good build and CLI install.
+In that remote shell, start the host from any directory:
 
-Keep that laptop command running. In a second SSH session, attach the
-host-side agent from the project directory on the headless machine:
+```bash
+clausroom host
+```
+
+The command prints a one-time browser URL beginning with
+`http://127.0.0.1:3000/#clausroom-session=...` if the headless machine cannot
+open a browser. Open that exact URL in the laptop browser; the SSH forward
+carries it to the headless server without exposing a public application port.
+
+Keep the forwarded SSH/host command running. In a second SSH session, attach
+the host-side agent from the project directory on the headless machine:
 
 ```bash
 ssh admin@171.64.160.63
@@ -526,9 +530,14 @@ cd /path/to/project
 clausroom project
 ```
 
-The launcher maintains separate mode-0600 active room contexts on the laptop
-and headless project machine. The guest workflow remains unchanged:
+The headless host maintains its mode-0600 active room context; the laptop keeps
+only its browser session. The guest workflow remains unchanged:
 `clausroom connect`, followed by `clausroom project` from the guest's project.
+
+If Clausroom is installed on the laptop, the optional
+`clausroom host --ssh admin@171.64.160.63` wrapper combines the SSH forward,
+remote setup, host launch, and browser handoff into one command, but it is not
+required.
 
 ## Troubleshooting
 
