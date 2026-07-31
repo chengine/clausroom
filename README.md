@@ -48,6 +48,9 @@ The guest pastes the offer, then sends the resulting
 There is no short copy/paste deadline. Both commands open a local browser and
 remain running for the session.
 
+If an offer or answer is pasted incorrectly, Clausroom reports the problem and
+prompts again without tearing down the room.
+
 That is the entire workflow: the host runs `host`; the guest runs `connect`.
 Neither person runs both commands or enters an IP address.
 

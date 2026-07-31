@@ -256,18 +256,33 @@ function decodeSignal(raw: string, expectedKind: PeerSignal['kind']): PeerSignal
 async function readSignalFileOrPrompt(
   file: string | undefined,
   label: 'offer' | 'answer',
-): Promise<string> {
+  validate?: (signal: PeerSignal) => void,
+): Promise<PeerSignal> {
+  const parse = (raw: string): PeerSignal => {
+    const signal = decodeSignal(raw, label);
+    validate?.(signal);
+    return signal;
+  };
   if (file) {
     const absolute = path.resolve(file);
     const stat = await fs.stat(absolute);
     if (stat.size > SIGNAL_MAX_BYTES * 2) {
       throw new Error(`Clausroom ${label} file is too large`);
     }
-    return fs.readFile(absolute, 'utf8');
+    return parse(await fs.readFile(absolute, 'utf8'));
   }
   const rl = readline.createInterface({ input, output: promptOutput });
   try {
-    return await rl.question(`Paste the Clausroom ${label} code, then press Enter:\n> `);
+    for (;;) {
+      const raw = await rl.question(`Paste the Clausroom ${label} code, then press Enter:\n> `);
+      try {
+        return parse(raw);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        log(`that ${label} was not accepted: ${message}`);
+        log(`still running; paste the correct ${label} code and try again`);
+      }
+    }
   } finally {
     rl.close();
   }
@@ -713,9 +728,11 @@ export async function runPeerHost(options: PeerHostOptions): Promise<void> {
     machineLine('CLAUSROOM_PEER_OFFER', encodeSignal(offer));
     log('send the offer code privately to the other participant');
 
-    const rawAnswer = await readSignalFileOrPrompt(options.answerFile, 'answer');
-    const answer = decodeSignal(rawAnswer, 'answer');
-    if (answer.session !== session) throw new Error('answer belongs to a different peer session');
+    const answer = await readSignalFileOrPrompt(options.answerFile, 'answer', (candidate) => {
+      if (candidate.session !== session) {
+        throw new Error('answer belongs to a different peer session');
+      }
+    });
     applyRemoteSignal(pc, answer);
 
     await withTimeout(
@@ -741,8 +758,7 @@ export async function runPeerJoin(options: PeerJoinOptions): Promise<void> {
     throw new Error('--listen-port must be an integer from 0 to 65535');
   }
   const stunUrls = validateStunUrls(options.stunUrls);
-  const rawOffer = await readSignalFileOrPrompt(options.offerFile, 'offer');
-  const offer = decodeSignal(rawOffer, 'offer');
+  const offer = await readSignalFileOrPrompt(options.offerFile, 'offer');
   const rtc = await loadRtc();
   const pc = new rtc.PeerConnection('clausroom-join', {
     iceServers: stunUrls,

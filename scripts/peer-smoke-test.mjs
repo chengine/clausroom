@@ -41,10 +41,26 @@ function startPeer(args, name) {
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   children.add(child);
+  child.stderrLog = '';
   child.stderr.setEncoding('utf8');
-  child.stderr.on('data', (chunk) => process.stderr.write(`[${name}] ${chunk}`));
+  child.stderr.on('data', (chunk) => {
+    child.stderrLog += chunk;
+    process.stderr.write(`[${name}] ${chunk}`);
+  });
   child.once('exit', () => children.delete(child));
   return child;
+}
+
+async function waitForStderr(child, pattern, timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (pattern.test(child.stderrLog)) return;
+    if (child.exitCode !== null || child.signalCode !== null) {
+      throw new Error(`peer exited before stderr matched ${pattern}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`timed out waiting for stderr to match ${pattern}`);
 }
 
 function waitForLine(child, prefix, timeoutMs = 30_000) {
@@ -123,11 +139,17 @@ try {
 
   join = startPeer(['peer', 'join', ...ICE_ARGS, '--listen-port', '0'], 'join');
   const answerPromise = waitForLine(join, 'CLAUSROOM_PEER_ANSWER');
+  join.stdin.write('not-a-clausroom-offer\n');
+  await waitForStderr(join, /still running; paste the correct offer code and try again/);
+  assert.equal(join.exitCode, null);
   join.stdin.write(`${offer}\n`);
   const answer = await answerPromise;
 
   const hostReadyPromise = waitForLine(host, 'CLAUSROOM_PEER_READY');
   const joinReadyPromise = waitForLine(join, 'CLAUSROOM_PEER_READY');
+  host.stdin.write('not-a-clausroom-answer\n');
+  await waitForStderr(host, /still running; paste the correct answer code and try again/);
+  assert.equal(host.exitCode, null);
   host.stdin.write(`${answer}\n`);
   const [hostTarget, localUrl] = await Promise.all([hostReadyPromise, joinReadyPromise]);
   assert.equal(hostTarget, `http://127.0.0.1:${address.port}`);
