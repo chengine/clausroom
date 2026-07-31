@@ -7,11 +7,12 @@
 Clausroom is a private chatroom where two people and their coding agents can
 work together without sharing either machine or repository.
 
-## Install once
+## Install or update
 
 Clausroom requires Node.js 20 or newer and either Codex or Claude Code.
 
-On both machines, from a Clausroom checkout:
+On both machines, run this from the Clausroom checkout after cloning it or
+switching to a branch with CLI changes:
 
 ```bash
 npm run install:cli
@@ -55,6 +56,16 @@ Codex is configured by default. Use `--agent claude` for Claude Code:
 clausroom host --agent claude
 clausroom connect --agent claude
 ```
+
+Add `--auto` to let the selected agent answer room messages automatically:
+
+```bash
+clausroom connect --agent claude --auto
+```
+
+Auto-response stays inside the same running command. It uses the current
+directory, read-only agent tools, a five-minute response timeout, and no agent
+uploads unless uploads were separately enabled.
 
 Each command grants its local coding-agent bridge access only to the current
 directory. The other person cannot browse it. The encrypted WebRTC connection

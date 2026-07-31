@@ -62,6 +62,7 @@ export interface HostCommandOptions {
   project?: boolean;
   agent?: ProjectCommandOptions['agent'];
   allowAgentUploads?: boolean;
+  auto?: boolean;
 }
 
 export interface ConnectCommandOptions {
@@ -72,11 +73,19 @@ export interface ConnectCommandOptions {
   project?: boolean;
   agent?: ProjectCommandOptions['agent'];
   allowAgentUploads?: boolean;
+  auto?: boolean;
 }
 
 export interface ProjectCommandOptions {
   agent: 'codex' | 'claude' | 'none';
   allowAgentUploads?: boolean;
+  auto?: boolean;
+}
+
+interface ManagedProjectAuto {
+  child: ChildProcess;
+  stopping: boolean;
+  removeForwarding: () => void;
 }
 
 function stateDir(): string {
@@ -364,13 +373,141 @@ function installChildForwarding(child: ChildProcess): () => void {
   };
 }
 
+function validateAutoRequest(
+  auto: boolean | undefined,
+  attachProject: boolean,
+  agent: ProjectCommandOptions['agent'],
+  ssh = false,
+): void {
+  if (!auto) return;
+  if (!attachProject) {
+    throw new Error(
+      ssh
+        ? '`--auto` cannot infer a project through `host --ssh`; run `clausroom host --auto` in the remote project shell instead.'
+        : '`--auto` requires the current project; remove `--no-project`.',
+    );
+  }
+  if (agent === 'none') {
+    throw new Error('`--auto` requires `--agent codex` or `--agent claude`.');
+  }
+}
+
+async function startProjectAuto(configPath: string): Promise<ManagedProjectAuto> {
+  const cli = currentCliCommand();
+  const child = spawn(cli.executable, [...cli.args, 'project-auto', '--config', configPath], {
+    cwd: process.cwd(),
+    stdio: ['ignore', 'pipe', 'inherit'],
+  });
+  if (!child.stdout) throw new Error('could not capture auto-responder startup output');
+
+  const managed: ManagedProjectAuto = {
+    child,
+    stopping: false,
+    removeForwarding: () => undefined,
+  };
+  const interrupt = (): void => {
+    managed.stopping = true;
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGINT');
+  };
+  const terminate = (): void => {
+    managed.stopping = true;
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+  };
+  process.once('SIGINT', interrupt);
+  process.once('SIGTERM', terminate);
+  managed.removeForwarding = () => {
+    process.removeListener('SIGINT', interrupt);
+    process.removeListener('SIGTERM', terminate);
+  };
+
+  const lines = readline.createInterface({ input: child.stdout });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error('auto responder did not become ready within 20 seconds'));
+      }, 20_000);
+      const cleanup = (): void => {
+        clearTimeout(timer);
+        child.removeListener('error', onError);
+        child.removeListener('exit', onExit);
+        lines.removeListener('line', onLine);
+      };
+      const onError = (err: Error): void => {
+        cleanup();
+        reject(new Error(`could not start auto responder: ${err.message}`));
+      };
+      const onExit = (code: number | null, signal: NodeJS.Signals | null): void => {
+        cleanup();
+        reject(
+          new Error(
+            `auto responder exited before becoming ready${signal ? ` (${signal})` : ` (code ${code ?? 1})`}`,
+          ),
+        );
+      };
+      const onLine = (line: string): void => {
+        if (line === 'CLAUSROOM_PROJECT_AUTO_READY') {
+          cleanup();
+          resolve();
+        } else {
+          process.stdout.write(`${line}\n`);
+        }
+      };
+      child.once('error', onError);
+      child.once('exit', onExit);
+      lines.on('line', onLine);
+    });
+  } catch (err) {
+    managed.stopping = true;
+    managed.removeForwarding();
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+    throw err;
+  } finally {
+    lines.close();
+  }
+
+  child.once('exit', (code, signal) => {
+    if (!managed.stopping) {
+      process.stderr.write(
+        `[clausroom] Auto responder stopped unexpectedly${signal ? ` (${signal})` : ` (code ${code ?? 1})`}.\n`,
+      );
+    }
+  });
+  return managed;
+}
+
+async function stopProjectAuto(managed: ManagedProjectAuto | undefined): Promise<void> {
+  if (!managed) return;
+  const signalAlreadyForwarded = managed.stopping;
+  managed.stopping = true;
+  managed.removeForwarding();
+  const { child } = managed;
+  if (child.exitCode !== null || child.signalCode !== null) return;
+
+  if (!signalAlreadyForwarded) child.kill('SIGTERM');
+  const exited = await new Promise<boolean>((resolve) => {
+    const timer = setTimeout(() => {
+      child.removeListener('exit', onExit);
+      resolve(false);
+    }, 10_000);
+    const onExit = (): void => {
+      clearTimeout(timer);
+      resolve(true);
+    };
+    child.once('exit', onExit);
+  });
+  if (!exited && child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+}
+
 export async function runHostCommand(options: HostCommandOptions): Promise<void> {
   const attachProject = options.project !== false && !options.ssh;
+  const agent = options.agent ?? 'codex';
+  validateAutoRequest(options.auto, attachProject, agent, Boolean(options.ssh));
   if (attachProject) await resolveProjectRoot();
   const serverPort = validatePort(options.serverPort, 3000, '--server-port');
   const localPort = validatePort(options.localPort, 43000, '--local-port');
   const connectionId = randomBytes(18).toString('base64url');
   let stateWritten = false;
+  let projectAuto: ManagedProjectAuto | undefined;
   let child: ChildProcess;
   let localServerUrl: string | undefined;
 
@@ -451,16 +588,18 @@ export async function runHostCommand(options: HostCommandOptions): Promise<void>
         await writeActiveRoom(active);
         stateWritten = true;
         if (attachProject) {
-          await runProjectCommand({
-            agent: options.agent ?? 'codex',
+          const configPath = await runProjectCommand({
+            agent,
             allowAgentUploads: options.allowAgentUploads,
+            auto: options.auto,
           });
+          if (options.auto) projectAuto = await startProjectAuto(configPath);
         }
         const browserUrl = sessionUrl(serverUrl, context.sessionToken);
         const opened = options.open === false ? false : await openBrowser(browserUrl);
         process.stderr.write(
           attachProject
-            ? `[clausroom] Host browser is ${serverUrl}; the current project is attached.\n`
+            ? `[clausroom] Host browser is ${serverUrl}; the current project is attached${options.auto ? ` and ${agent} auto-response is running` : ''}.\n`
             : `[clausroom] Host browser is ${serverUrl}; project attachment was skipped.\n`,
         );
         if (!opened && options.open !== false) {
@@ -482,6 +621,7 @@ export async function runHostCommand(options: HostCommandOptions): Promise<void>
   } finally {
     removeForwarding();
     lines.close();
+    await stopProjectAuto(projectAuto);
     if (stateWritten) await clearActiveRoom(connectionId);
   }
 }
@@ -505,9 +645,12 @@ async function exchangeInvite(localUrl: string, inviteToken: string): Promise<st
 
 export async function runConnectCommand(options: ConnectCommandOptions): Promise<void> {
   const attachProject = options.project !== false;
+  const agent = options.agent ?? 'codex';
+  validateAutoRequest(options.auto, attachProject, agent);
   if (attachProject) await resolveProjectRoot();
   const connectionId = randomBytes(18).toString('base64url');
   let stateWritten = false;
+  let projectAuto: ManagedProjectAuto | undefined;
   try {
     await runPeerJoin({
       offerFile: options.offerFile,
@@ -535,16 +678,18 @@ export async function runConnectCommand(options: ConnectCommandOptions): Promise
         stateWritten = true;
         const token = await exchangeInvite(localUrl, roomInvite.inviteToken);
         if (attachProject) {
-          await runProjectCommand({
-            agent: options.agent ?? 'codex',
+          const configPath = await runProjectCommand({
+            agent,
             allowAgentUploads: options.allowAgentUploads,
+            auto: options.auto,
           });
+          if (options.auto) projectAuto = await startProjectAuto(configPath);
         }
         const browserUrl = sessionUrl(localUrl, token);
         const opened = options.open === false ? false : await openBrowser(browserUrl);
         process.stderr.write(
           attachProject
-            ? `[clausroom] Connected. Browser URL: ${localUrl}; the current project is attached.\n`
+            ? `[clausroom] Connected. Browser URL: ${localUrl}; the current project is attached${options.auto ? ` and ${agent} auto-response is running` : ''}.\n`
             : `[clausroom] Connected. Browser URL: ${localUrl}; project attachment was skipped.\n`,
         );
         if (!opened && options.open !== false) {
@@ -553,6 +698,7 @@ export async function runConnectCommand(options: ConnectCommandOptions): Promise
       },
     });
   } finally {
+    await stopProjectAuto(projectAuto);
     if (stateWritten) await clearActiveRoom(connectionId);
   }
 }
@@ -561,7 +707,12 @@ function tomlString(value: string): string {
   return JSON.stringify(value);
 }
 
-function projectConfig(active: ActiveRoom, root: string, allowAgentUploads: boolean): string {
+function projectConfig(
+  active: ActiveRoom,
+  root: string,
+  allowAgentUploads: boolean,
+  autoAgent?: Exclude<ProjectCommandOptions['agent'], 'none'>,
+): string {
   return `# Generated by \`clausroom host\`, \`clausroom connect\`, or \`clausroom project\`. Contains no credential.
 [identity]
 human_name = ${tomlString(active.humanName)}
@@ -584,6 +735,20 @@ max_upload_bytes_absolute = 26214400
 [filesystem]
 roots = [${tomlString(root)}]
 deny_globs = []
+${
+  autoAgent
+    ? `
+[auto]
+engine = ${tomlString(autoAgent)}
+workdir = ${tomlString(root)}
+allowed_tools = ["Read", "Grep", "Glob"]
+max_turns = 25
+timeout_seconds = 300
+max_context_messages = 30
+respond_to = "addressed"
+`
+    : ''
+}
 `;
 }
 
@@ -604,6 +769,9 @@ function currentCliCommand(): { executable: string; args: string[] } {
 }
 
 export async function runProjectCommand(options: ProjectCommandOptions): Promise<string> {
+  if (options.auto && options.agent === 'none') {
+    throw new Error('`--auto` requires `--agent codex` or `--agent claude`.');
+  }
   const active = await readActiveRoom();
   const root = await resolveProjectRoot();
   const digest = createHash('sha256').update(root).digest('hex').slice(0, 20);
@@ -617,7 +785,12 @@ export async function runProjectCommand(options: ProjectCommandOptions): Promise
   const configPath = path.join(projectsDir, `${digest}.toml`);
   await atomicPrivateWrite(
     configPath,
-    projectConfig(active, root, Boolean(options.allowAgentUploads)),
+    projectConfig(
+      active,
+      root,
+      Boolean(options.allowAgentUploads),
+      options.auto ? options.agent as Exclude<ProjectCommandOptions['agent'], 'none'> : undefined,
+    ),
   );
 
   if (options.agent !== 'none') {
@@ -638,6 +811,9 @@ export async function runProjectCommand(options: ProjectCommandOptions): Promise
 
   process.stdout.write(`Clausroom project attached: ${root}\n`);
   process.stdout.write(`Filesystem access is limited to that directory; agent uploads are ${options.allowAgentUploads ? 'approval-gated' : 'disabled'}.\n`);
+  if (options.auto) {
+    process.stdout.write(`${options.agent} auto-response configured with read-only tools.\n`);
+  }
   return configPath;
 }
 
@@ -661,4 +837,20 @@ export async function runProjectMcp(configPath: string | undefined): Promise<voi
   }
   process.env[TOKEN_ENV] = active.bridgeToken;
   await runMcpServer(configPath);
+}
+
+export async function runProjectAuto(configPath: string | undefined): Promise<void> {
+  if (!configPath) throw new Error('project-auto requires --config');
+  const active = await readActiveRoom();
+  const config = loadConfig(configPath);
+  if (config.room.room_id !== active.roomId || config.room.server_url !== active.serverUrl) {
+    throw new Error(
+      'This project configuration belongs to a different Clausroom connection. Start host/connect again.',
+    );
+  }
+  process.env[TOKEN_ENV] = active.bridgeToken;
+  const { runAutoResponder } = await import('./auto.js');
+  await runAutoResponder(configPath, () => {
+    process.stdout.write('CLAUSROOM_PROJECT_AUTO_READY\n');
+  });
 }

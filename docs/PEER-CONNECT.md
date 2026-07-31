@@ -61,13 +61,24 @@ still-running host command.
 When ICE and peer authentication succeed, each person's browser opens against
 a loopback URL. Both commands stay running and automatically attach the
 directory from which they were launched. Codex is configured by default; use
-`--agent claude` for Claude Code. Agent uploads default to off; enabling
-`--allow-agent-uploads` still requires human approval. Use `--no-project` for
-chat without attaching a project, or run `clausroom project` from a different
-repository to switch while the connection is running.
+`--agent claude` for Claude Code. Add `--auto` to run that selected agent as an
+automatic responder inside the same supervised command:
 
-The generated MCP configuration uses the current directory as its only
-filesystem root and contains no credential. It reads the room-scoped token from
+```bash
+clausroom connect --agent claude --auto
+```
+
+Streamlined auto mode uses the current project, read-only tools, a 300-second
+per-response timeout, at most 30 context messages, and addressed-response mode.
+It ignores `agent_answer` messages to prevent two automatic
+agents from answering each other's answers. Agent uploads default to off;
+enabling `--allow-agent-uploads` still requires human approval. Use
+`--no-project` for chat without attaching a project, or run `clausroom project`
+from a different repository to switch while the connection is running.
+
+The generated MCP/auto configuration uses the current directory as its only
+filesystem root and contains no credential. The supervised launch reads the
+room-scoped token from
 `~/.clausroom/active-room.json`, which is mode 0600, owned by the running
 `host`/`connect` command, and removed at shutdown. Browser session tokens travel
 in a URL fragment (not an HTTP request) and the UI removes the fragment

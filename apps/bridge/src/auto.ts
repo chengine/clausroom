@@ -60,7 +60,7 @@ const FETCH_RETRY_MS = 10_000;
 const MAX_NETWORK_POST_RETRIES = 5;
 
 /** Message types the responder never answers (contract task list + §13). */
-const SKIPPED_MESSAGE_TYPES = new Set(['system_event', 'artifact_uploaded']);
+const SKIPPED_MESSAGE_TYPES = new Set(['system_event', 'artifact_uploaded', 'agent_answer']);
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -83,8 +83,9 @@ function renderMessage(m: Message): string {
 }
 
 /**
- * Should the responder answer this message? Always skips own messages,
- * system_event, and artifact_uploaded; then applies respond_to:
+ * Should the responder answer this message? Always skips own messages and
+ * terminal/non-prompt messages (system events, artifacts, and agent answers),
+ * then applies respond_to:
  *   - 'addressed': recipient_ids includes me, OR recipient_ids is empty
  *     (everyone) and the sender is not me.
  *   - 'mentions_only': recipient_ids must explicitly include me.
@@ -481,7 +482,10 @@ class AutoResponder {
 // Entry point for `clausroom-bridge auto`
 // ---------------------------------------------------------------------------
 
-export async function runAutoResponder(configPath: string | undefined): Promise<void> {
+export async function runAutoResponder(
+  configPath: string | undefined,
+  onReady?: () => void,
+): Promise<void> {
   const cfg = loadConfig(configPath);
   const auto = parseAutoConfig(cfg); // throws ConfigError when [auto] is missing/invalid
 
@@ -543,7 +547,10 @@ export async function runAutoResponder(configPath: string | undefined): Promise<
     '[auto] room content is UNTRUSTED input to the engine; replies pass local policy and server limits.',
   );
 
+  let shuttingDown = false;
   const shutdown = (signal: string): void => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     log(`[auto] received ${signal}, shutting down`);
     responder.stop(); // aborts any in-flight engine run (SIGTERM → SIGKILL, process group)
     activity.stop();
@@ -562,5 +569,6 @@ export async function runAutoResponder(configPath: string | undefined): Promise<
   process.once('SIGTERM', () => shutdown('SIGTERM'));
 
   await responder.prime();
+  onReady?.();
   await responder.run();
 }

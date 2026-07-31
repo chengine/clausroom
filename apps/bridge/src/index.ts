@@ -130,6 +130,7 @@ program
     '--allow-agent-uploads',
     'allow the agent to propose files from this project (human approval is still required)',
   )
+  .option('--auto', 'automatically answer room messages with the selected agent using read-only tools')
   .option('--no-project', 'do not attach the current directory as a project')
   .option('--no-stun', 'disable STUN and try host candidates only')
   .option('--no-open', 'do not open the local browser automatically')
@@ -146,6 +147,7 @@ program
       skipSetup?: boolean;
       agent?: ProjectAgent;
       allowAgentUploads?: boolean;
+      auto?: boolean;
       project?: boolean;
       stun?: boolean;
       open?: boolean;
@@ -177,6 +179,7 @@ program
     '--allow-agent-uploads',
     'allow the agent to propose files from this project (human approval is still required)',
   )
+  .option('--auto', 'automatically answer room messages with the selected agent using read-only tools')
   .option('--no-project', 'do not attach the current directory as a project')
   .option('--no-open', 'do not open the browser automatically')
   .action(
@@ -186,6 +189,7 @@ program
       stun?: string[] | boolean;
       agent?: ProjectAgent;
       allowAgentUploads?: boolean;
+      auto?: boolean;
       project?: boolean;
       open?: boolean;
     }) => {
@@ -197,6 +201,7 @@ program
           stunUrls: opts.stun === false ? [] : Array.isArray(opts.stun) ? opts.stun : undefined,
           agent: opts.agent,
           allowAgentUploads: opts.allowAgentUploads,
+          auto: opts.auto,
           project: opts.project,
           open: opts.open,
         });
@@ -243,6 +248,22 @@ program
     } catch (err) {
       process.stderr.write(
         `project bridge startup failed: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+      process.exit(1);
+    }
+  });
+
+program
+  .command('project-auto', { hidden: true })
+  .description('Internal auto-responder launcher for `clausroom host/connect --auto`.')
+  .requiredOption('-c, --config <path>', 'generated project bridge config')
+  .action(async (opts: { config: string }) => {
+    try {
+      const { runProjectAuto } = await import('./convenience.js');
+      await runProjectAuto(opts.config);
+    } catch (err) {
+      process.stderr.write(
+        `project auto-response startup failed: ${err instanceof Error ? err.message : String(err)}\n`,
       );
       process.exit(1);
     }

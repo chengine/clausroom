@@ -43,12 +43,22 @@ clausroom connect
 ```
 
 Both commands configure Codex by default. Use `--agent claude` for Claude Code,
+add `--auto` to run the selected agent as a supervised read-only responder,
 `--allow-agent-uploads` to enable approval-gated uploads, or `--no-project` for
 chat without a coding project. Run `clausroom project` from another repository
 only to switch the attachment while the connection is running.
 
-`host` and `connect` stay running. Their generated MCP configuration stores no
-raw token and sets its sole filesystem root to the command's current directory.
+```bash
+clausroom connect --agent claude --auto
+```
+
+The streamlined auto mode generates safe defaults, obtains the active room
+credential internally, and stops with `host`/`connect`; it needs no manual
+`[auto]` table or token export. Automatic responders ignore `agent_answer`
+messages so two enabled agents do not answer each other's answers indefinitely.
+
+`host` and `connect` stay running. Their generated MCP/auto configuration stores
+no raw token and sets its sole filesystem root to the command's current directory.
 The room credential is in a mode-0600 active connection file only for the
 connection lifetime. The combined offer includes room credentials, so exchange
 the complete `CLAUSROOM_PEER_OFFER ...` line privately.

@@ -1001,7 +1001,7 @@ The `[auto]` table is required for this subcommand only; other subcommands ignor
 | `max_turns` | int | `25` | Engine-internal turn cap per run. |
 | `timeout_seconds` | int | `300` | Wall-clock cap per engine run; on timeout the run is killed and no reply is posted. |
 | `max_context_messages` | int | `30` | Max recent room messages included in the composed prompt. |
-| `respond_to` | `'addressed' \| 'mentions_only'` | `'addressed'` | `addressed`: reply when `recipient_ids` includes this agent, **or** `recipient_ids` is empty and the sender is not this agent. `mentions_only`: reply only when `recipient_ids` explicitly includes this agent. |
+| `respond_to` | `'addressed' \| 'mentions_only'` | `'addressed'` | `addressed`: reply when `recipient_ids` includes this agent, **or** `recipient_ids` is empty and the sender is not this agent. `mentions_only`: reply only when `recipient_ids` explicitly includes this agent. Own messages, `system_event`, `artifact_uploaded`, and `agent_answer` are always ignored. |
 | `custom_command` | string[] (argv) | *(unset)* | Required (non-empty) when `engine = 'custom'`; rejected for other engines. The bridge spawns it with the composed prompt on **stdin**; it must print the reply markdown to **stdout** (exit code 0). |
 | `extra_args` | string[] | `[]` | Extra argv appended to the engine CLI invocation. |
 | `bare` | bool | `false` | When true, skip the bridge's prompt scaffolding and pass the triggering message body as the prompt verbatim. |
@@ -1018,6 +1018,15 @@ and the server's guardrails — pause flags, rate limit, and the consecutive-age
 `AGENT_ROOM_MAX_AUTO_TURNS` messages until a human replies (or clicks
 **Continue**, §4). The bridge emits `working`/`idle` activity frames around
 engine runs like any other tool execution (§12).
+
+The streamlined `clausroom host|connect --agent <engine> --auto` form generates
+this section with the current project as `workdir`, read-only tools, and the
+documented defaults. Its supervised child receives the bridge credential from
+the mode-0600 active connection state, never from the config or engine child
+environment, and stops when the owning `host`/`connect` command stops. The
+Claude invocation uses only its explicit read-only tools and ignores ambient
+MCP servers; the Codex invocation ignores user configuration/MCP servers, runs
+ephemerally, uses the read-only sandbox, and never requests approval.
 
 ## 14. Server stdout lines (machine-readable, BINDING)
 

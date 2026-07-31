@@ -6,7 +6,8 @@
  *
  * It uses separate state directories for the two simulated users, disables
  * STUN for deterministic same-machine ICE, and verifies that the generated
- * project config contains one exact root and no credential.
+ * project config contains one exact root and no credential. The guest enables
+ * supervised Codex auto-response through a fake read-only engine executable.
  */
 
 import assert from 'node:assert/strict';
@@ -27,10 +28,47 @@ const guestState = path.join(tempRoot, 'guest-state');
 const hostSessionState = path.join(tempRoot, 'host-session');
 const projectRoot = path.join(tempRoot, 'project');
 const hostProjectRoot = path.join(tempRoot, 'host-project');
+const guestHome = path.join(tempRoot, 'guest-home');
+const fakeBin = path.join(tempRoot, 'fake-bin');
 const children = new Set();
 
 await fs.mkdir(projectRoot, { recursive: true });
 await fs.mkdir(hostProjectRoot, { recursive: true });
+await fs.mkdir(guestHome, { recursive: true });
+await fs.mkdir(fakeBin, { recursive: true });
+await fs.writeFile(
+  path.join(fakeBin, 'codex'),
+  `#!/usr/bin/env node
+const args = process.argv.slice(2);
+const execIndex = args.indexOf('exec');
+if (execIndex === -1) process.exit(0);
+if (
+  args[execIndex - 2] !== '--ask-for-approval' ||
+  args[execIndex - 1] !== 'never' ||
+  !args.includes('--ignore-user-config') ||
+  !args.includes('--ephemeral') ||
+  !args.includes('read-only')
+) {
+  process.stderr.write('Codex auto invocation was not isolated and read-only\\n');
+  process.exit(7);
+}
+let prompt = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => { prompt += chunk; });
+process.stdin.on('end', () => {
+  if (process.env.AGENT_ROOM_BRIDGE_TOKEN) {
+    process.stderr.write('bridge token leaked into engine environment\\n');
+    process.exit(9);
+  }
+  if (!prompt.includes('AUTOMATED_CONVENIENCE_QUESTION')) {
+    process.stderr.write('expected question was absent from engine prompt\\n');
+    process.exit(8);
+  }
+  process.stdout.write('Automated response from supervised Codex.\\nConfidence: high\\n');
+});
+`,
+  { mode: 0o755 },
+);
 
 function lineBus(stream, label) {
   const values = [];
@@ -77,10 +115,45 @@ function start(args, { cwd = ROOT, env = {} } = {}) {
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   children.add(child);
+  child.stderrLog = '';
   child.stderr.setEncoding('utf8');
-  child.stderr.on('data', (chunk) => process.stderr.write(chunk));
+  child.stderr.on('data', (chunk) => {
+    child.stderrLog += chunk;
+    process.stderr.write(chunk);
+  });
   child.once('exit', () => children.delete(child));
   return child;
+}
+
+async function waitForStderr(child, pattern, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (pattern.test(child.stderrLog)) return;
+    if (child.exitCode !== null || child.signalCode !== null) {
+      throw new Error(`process exited before stderr matched ${pattern}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`timed out waiting for stderr to match ${pattern}`);
+}
+
+async function waitForAutoReply(localUrl, roomId, token, replyTo, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const response = await fetch(`${localUrl}/api/rooms/${roomId}/messages?limit=100`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    const reply = body.messages.find(
+      (message) =>
+        message.reply_to_message_id === replyTo &&
+        message.body_markdown === 'Automated response from supervised Codex.',
+    );
+    if (reply) return reply;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error('timed out waiting for supervised auto-response');
 }
 
 function freePort() {
@@ -187,9 +260,13 @@ try {
   assert.match(decodedOffer.room.inviteToken, /^arit_[0-9a-f]{32}$/);
   assert.match(decodedOffer.room.bridgeToken, /^arbt_[0-9a-f]{32}$/);
 
-  guest = start(['connect', '--no-stun', '--no-open', '--agent', 'none'], {
+  guest = start(['connect', '--no-stun', '--no-open', '--agent', 'codex', '--auto'], {
     cwd: projectRoot,
-    env: { CLAUSROOM_STATE_DIR: guestState },
+    env: {
+      CLAUSROOM_STATE_DIR: guestState,
+      HOME: guestHome,
+      PATH: `${fakeBin}${path.delimiter}${process.env.PATH ?? ''}`,
+    },
   });
   guestLines = lineBus(guest.stdout, 'guest');
   guest.stdin.write(`CLAUSROOM_PEER_OFFER ${offer}\n`);
@@ -234,7 +311,38 @@ try {
   const config = await fs.readFile(guestConfigPath, 'utf8');
   assert.match(config, new RegExp(`roots = \\[${JSON.stringify(projectRoot).replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}\\]`));
   assert.match(config, /allow_agent_to_upload_files = false/);
+  assert.match(config, /\[auto\]/);
+  assert.match(config, /engine = "codex"/);
+  assert.match(config, new RegExp(`workdir = ${JSON.stringify(projectRoot).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  assert.match(config, /allowed_tools = \["Read", "Grep", "Glob"\]/);
+  assert.match(config, /respond_to = "addressed"/);
   assert.doesNotMatch(config, /(?:arit|arbt|arst)_/);
+
+  await waitForStderr(guest, /\[auto\] connected to room/);
+  const questionResponse = await fetch(
+    `${localUrl}/api/rooms/${decodedOffer.room.roomId}/messages`,
+    {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${hostActive.bridgeToken}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        recipient_ids: [],
+        message_type: 'agent_question',
+        body_markdown: 'AUTOMATED_CONVENIENCE_QUESTION',
+      }),
+    },
+  );
+  assert.equal(questionResponse.status, 201);
+  const question = (await questionResponse.json()).message;
+  const autoReply = await waitForAutoReply(
+    localUrl,
+    decodedOffer.room.roomId,
+    hostActive.bridgeToken,
+    question.id,
+  );
+  assert.equal(autoReply.confidence, 'high');
 
   const check = start(['check', '--config', guestConfigPath], {
     cwd: projectRoot,

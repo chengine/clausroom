@@ -7,9 +7,11 @@
  *              JSON printed to stdout carries the reply in its `result` field
  *              plus run metadata (total_cost_usd, num_turns, permission_denials)
  *              that we log to stderr.
- *   - codex:   `codex exec --sandbox read-only --ask-for-approval never` —
- *              EXPERIMENTAL: coded from the documented interface, not verified
- *              on this machine. Prompt on stdin, plain-text reply on stdout.
+ *   - codex:   `codex --ask-for-approval never exec --ignore-user-config
+ *              --ephemeral --sandbox read-only` — EXPERIMENTAL. Prompt on
+ *              stdin, plain-text reply on stdout. Ignoring user config keeps
+ *              ambient MCP servers out of the autonomous run while retaining
+ *              Codex authentication.
  *   - custom:  any argv array from auto.custom_command, spawned directly
  *              (NEVER through a shell). Prompt on stdin, reply on stdout.
  *              This is also the engine CI can exercise hermetically.
@@ -220,6 +222,7 @@ export function engineArgv(auto: AutoConfig): { command: string; args: string[] 
         'json',
         '--permission-mode',
         'dontAsk',
+        '--strict-mcp-config',
         '--allowedTools',
         auto.allowed_tools.join(','),
         '--max-turns',
@@ -236,7 +239,16 @@ export function engineArgv(auto: AutoConfig): { command: string; args: string[] 
     case 'codex':
       return {
         command: 'codex',
-        args: ['exec', '--sandbox', 'read-only', '--ask-for-approval', 'never', ...auto.extra_args],
+        args: [
+          '--ask-for-approval',
+          'never',
+          'exec',
+          '--ignore-user-config',
+          '--ephemeral',
+          '--sandbox',
+          'read-only',
+          ...auto.extra_args,
+        ],
       };
     case 'custom':
       // parseAutoConfig guarantees custom_command is non-empty here.
