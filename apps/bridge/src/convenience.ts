@@ -602,8 +602,10 @@ export async function runHostCommand(options: HostCommandOptions): Promise<void>
             ? `[clausroom] Host browser is ${serverUrl}; the current project is attached${options.auto ? ` and ${agent} auto-response is running` : ''}.\n`
             : `[clausroom] Host browser is ${serverUrl}; project attachment was skipped.\n`,
         );
-        if (!opened && options.open !== false) {
-          process.stderr.write(`[clausroom] Browser did not open automatically. Open: ${browserUrl}\n`);
+        if (!opened) {
+          process.stderr.write(
+            `[clausroom] Open this private browser URL (do not share): ${browserUrl}\n`,
+          );
         }
       })
       .catch((err) => {
@@ -692,8 +694,10 @@ export async function runConnectCommand(options: ConnectCommandOptions): Promise
             ? `[clausroom] Connected. Browser URL: ${localUrl}; the current project is attached${options.auto ? ` and ${agent} auto-response is running` : ''}.\n`
             : `[clausroom] Connected. Browser URL: ${localUrl}; project attachment was skipped.\n`,
         );
-        if (!opened && options.open !== false) {
-          process.stderr.write(`[clausroom] Browser did not open automatically. Open: ${browserUrl}\n`);
+        if (!opened) {
+          process.stderr.write(
+            `[clausroom] Open this private browser URL (do not share): ${browserUrl}\n`,
+          );
         }
       },
     });

@@ -119,7 +119,7 @@ function start(args, { cwd = ROOT, env = {} } = {}) {
   child.stderr.setEncoding('utf8');
   child.stderr.on('data', (chunk) => {
     child.stderrLog += chunk;
-    process.stderr.write(chunk);
+    process.stderr.write(chunk.replace(/arst_[0-9a-f]{32}/g, '[session-redacted]'));
   });
   child.once('exit', () => children.delete(child));
   return child;
@@ -278,6 +278,18 @@ try {
     hostLines.wait('CLAUSROOM_UP_READY'),
   ]);
   assert.match(localUrl, /^http:\/\/127\.0\.0\.1:\d+$/);
+  await Promise.all([
+    waitForStderr(host, /Open this private browser URL \(do not share\):/),
+    waitForStderr(guest, /Open this private browser URL \(do not share\):/),
+  ]);
+  assert.match(
+    host.stderrLog,
+    /Open this private browser URL \(do not share\): http:\/\/127\.0\.0\.1:\d+\/#clausroom-session=arst_[0-9a-f]{32}/,
+  );
+  assert.match(
+    guest.stderrLog,
+    /Open this private browser URL \(do not share\): http:\/\/127\.0\.0\.1:\d+\/#clausroom-session=arst_[0-9a-f]{32}/,
+  );
 
   const hostActivePath = path.join(hostState, 'active-room.json');
   const remoteHostActivePath = path.join(remoteHostState, 'active-room.json');

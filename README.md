@@ -45,7 +45,8 @@ clausroom connect
 
 The guest pastes the offer, then sends the resulting
 `CLAUSROOM_PEER_ANSWER ...` line back to the host. The host pastes the answer.
-Both commands open a local browser and remain running for the session.
+There is no short copy/paste deadline. Both commands open a local browser and
+remain running for the session.
 
 That is the entire workflow: the host runs `host`; the guest runs `connect`.
 Neither person runs both commands or enters an IP address.
@@ -95,13 +96,13 @@ In that SSH shell:
 
 ```bash
 cd /path/to/host-repository
-clausroom host
+clausroom host --no-open
 ```
 
-Leave the SSH session running. If the remote machine cannot open a browser, the
-command prints a one-time `http://127.0.0.1:3000/#clausroom-session=...` URL.
-Open that URL on the laptop. The SSH forward carries only the local Clausroom
-web UI; the repository and agent remain on the host machine.
+Leave the SSH session running and open the private authenticated
+`http://127.0.0.1:3000/#clausroom-session=...` URL printed by the command on
+the laptop. Do not share that URL. The SSH forward carries only the local
+Clausroom web UI; the repository and agent remain on the host machine.
 
 ### What if I SSH into the guest/connect machine from my laptop?
 
@@ -118,7 +119,7 @@ In that SSH shell:
 
 ```bash
 cd /path/to/guest-repository
-clausroom connect --listen-port 43001
+clausroom connect --listen-port 43001 --no-open
 ```
 
 Paste the host's offer and return the answer as usual. Leave SSH running and

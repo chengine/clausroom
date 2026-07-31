@@ -829,13 +829,13 @@ export async function runPeerJoin(options: PeerJoinOptions): Promise<void> {
     pc.setLocalDescription('answer');
     const answer = await collectSignal(pc, signalCollector, 'answer', offer.session);
     machineLine('CLAUSROOM_PEER_ANSWER', encodeSignal(answer));
-    log('send the answer code privately to the host; waiting for the direct path');
+    log('send the answer code privately to the host; waiting without a copy/paste deadline');
 
-    await withTimeout(
-      Promise.race([authorized.promise, lifecycle.failed.promise]),
-      CONNECT_TIMEOUT_MS,
-      'direct peer authentication',
-    );
+    // A human may need more than 45 seconds to carry the answer back to the
+    // host. The host starts its bounded connectivity check only after that
+    // answer is pasted, so imposing another timer here only penalizes manual
+    // signaling without detecting network failures any sooner.
+    await Promise.race([authorized.promise, lifecycle.failed.promise]);
     await lifecycle.connected.promise;
     reportDirectPath(pc);
 
