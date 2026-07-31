@@ -224,8 +224,9 @@ clausroom host --ssh admin@171.64.160.63
 That keeps the server loopback-only, creates an SSH **local** forward for the
 host's laptop browser, runs the remote checkout at
 `~/StanfordMSL/clausroom`, and performs `npm install` plus `npm run build`
-before launch. Pass `--remote-dir /another/path` when needed, or
-`--skip-setup` after a known-good build.
+and installs the `clausroom` command on that remote machine before launch.
+Pass `--remote-dir /another/path` when needed, or `--skip-setup` after a
+known-good build/global install.
 
 The host sends the printed `CLAUSROOM_PEER_OFFER` privately. From any directory,
 the other person runs:
@@ -246,6 +247,11 @@ cd /path/to/project
 clausroom project                 # Codex
 # or: clausroom project --agent claude
 ```
+
+For an SSH-hosted project, run those two lines in a second SSH session on the
+host machine. The original laptop terminal keeps `clausroom host --ssh ...`
+running and owns the browser/local forward; the remote host command maintains a
+separate mode-0600 active context so its local coding agent can attach.
 
 This generated MCP configuration contains no token and names exactly the
 current directory as its sole filesystem root. The active room credential is

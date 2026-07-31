@@ -116,7 +116,7 @@ program
   .option('--room-name <name>', 'room display name')
   .option('--host-name <name>', 'host participant display name')
   .option('--guest-name <name>', 'guest participant display name')
-  .option('--skip-setup', 'skip npm install and npm run build')
+  .option('--skip-setup', 'skip dependency install, build, and remote CLI install')
   .option('--no-stun', 'disable STUN and try host candidates only')
   .option('--no-open', 'do not open the local browser automatically')
   .action(

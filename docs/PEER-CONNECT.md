@@ -54,7 +54,7 @@ clausroom host --ssh admin@171.64.160.63
 The SSH form uses a loopback-only local forward (default laptop port 43000) and
 the remote source checkout at `~/StanfordMSL/clausroom`. Override it with
 `--remote-dir`; use `--skip-setup` to omit the otherwise automatic
-`npm install` and `npm run build`.
+`npm install`, build, and remote global CLI install.
 
 After room creation, the command prints one long line beginning with
 `CLAUSROOM_PEER_OFFER`. Send the complete line privately. The guest can launch
@@ -77,6 +77,11 @@ cd /path/to/the/project
 clausroom project                 # configures Codex
 # or: clausroom project --agent claude
 ```
+
+For an SSH-hosted project, run `project` in a second SSH session on the remote
+host. The first laptop terminal continues to own the host command, browser, and
+local forward. The launcher writes separate mode-0600 active contexts on the
+laptop and remote project machine, both removed on normal shutdown.
 
 `project` uses the current directory as the only filesystem root, defaults
 agent uploads to off, and writes a credential-free MCP configuration. It reads

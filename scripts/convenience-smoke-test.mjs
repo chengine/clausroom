@@ -21,12 +21,15 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CLI = path.join(ROOT, 'apps', 'bridge', 'dist-npm', 'cli.mjs');
 const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'clausroom-convenience-'));
 const hostState = path.join(tempRoot, 'host-state');
+const remoteHostState = path.join(tempRoot, 'remote-host-state');
 const guestState = path.join(tempRoot, 'guest-state');
 const hostSessionState = path.join(tempRoot, 'host-session');
 const projectRoot = path.join(tempRoot, 'project');
+const hostProjectRoot = path.join(tempRoot, 'host-project');
 const children = new Set();
 
 await fs.mkdir(projectRoot, { recursive: true });
+await fs.mkdir(hostProjectRoot, { recursive: true });
 
 function lineBus(stream, label) {
   const values = [];
@@ -155,6 +158,7 @@ try {
         AGENT_ROOM_DB: path.join(tempRoot, 'clausroom.sqlite'),
         AGENT_ROOM_ARTIFACT_DIR: path.join(tempRoot, 'artifacts'),
         CLAUSROOM_HOST_STATE_DIR: hostSessionState,
+        CLAUSROOM_HOST_ACTIVE_STATE_DIR: remoteHostState,
         CLAUSROOM_STATE_DIR: hostState,
       },
     },
@@ -181,14 +185,19 @@ try {
   assert.match(localUrl, /^http:\/\/127\.0\.0\.1:\d+$/);
 
   const hostActivePath = path.join(hostState, 'active-room.json');
+  const remoteHostActivePath = path.join(remoteHostState, 'active-room.json');
   const guestActivePath = path.join(guestState, 'active-room.json');
   const hostActive = JSON.parse(await waitForFile(hostActivePath));
+  const remoteHostActive = JSON.parse(await waitForFile(remoteHostActivePath));
   const guestActive = JSON.parse(await waitForFile(guestActivePath));
   assert.equal(hostActive.role, 'host');
+  assert.equal(remoteHostActive.role, 'host');
   assert.equal(guestActive.role, 'guest');
+  assert.equal(remoteHostActive.serverUrl, `http://127.0.0.1:${serverPort}`);
   assert.equal(guestActive.serverUrl, localUrl);
   assert.equal(guestActive.roomId, decodedOffer.room.roomId);
   assert.equal((await fs.stat(hostActivePath)).mode & 0o777, 0o600);
+  assert.equal((await fs.stat(remoteHostActivePath)).mode & 0o777, 0o600);
   assert.equal((await fs.stat(guestActivePath)).mode & 0o777, 0o600);
 
   const health = await fetch(`${localUrl}/healthz`);
@@ -232,6 +241,23 @@ try {
   assert.equal(check.exitCode, 0);
   assert.match(checkOutput.join(''), /All checks passed/);
 
+  // Simulate `clausroom project` on the SSH target while host/browser control
+  // remains in the outer process on the laptop.
+  const hostProject = start(['project', '--agent', 'none'], {
+    cwd: hostProjectRoot,
+    env: { CLAUSROOM_STATE_DIR: remoteHostState },
+  });
+  await waitForExit(hostProject);
+  assert.equal(hostProject.exitCode, 0);
+  const hostProjectFiles = await fs.readdir(path.join(remoteHostState, 'projects'));
+  assert.equal(hostProjectFiles.length, 1);
+  const hostConfig = await fs.readFile(
+    path.join(remoteHostState, 'projects', hostProjectFiles[0]),
+    'utf8',
+  );
+  assert.match(hostConfig, new RegExp(JSON.stringify(hostProjectRoot).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.doesNotMatch(hostConfig, /(?:arit|arbt|arst)_/);
+
   process.stdout.write('convenience command smoke test passed\n');
 } finally {
   hostLines?.close();
@@ -241,6 +267,7 @@ try {
   const failure = shutdown.find((result) => result.status === 'rejected');
   if (!failure) {
     await assert.rejects(fs.access(path.join(hostState, 'active-room.json')), { code: 'ENOENT' });
+    await assert.rejects(fs.access(path.join(remoteHostState, 'active-room.json')), { code: 'ENOENT' });
     await assert.rejects(fs.access(path.join(guestState, 'active-room.json')), { code: 'ENOENT' });
   }
   await fs.rm(tempRoot, { recursive: true, force: true });

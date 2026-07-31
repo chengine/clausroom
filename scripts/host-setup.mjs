@@ -36,6 +36,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import http from 'node:http';
@@ -76,6 +77,15 @@ const HOST_SESSION_FILE = () =>
       ? path.resolve(process.env.CLAUSROOM_HOST_STATE_DIR)
       : path.join(os.homedir(), '.clausroom'),
     'host-session.json',
+  );
+const CLI_ACTIVE_ROOM_FILE = () =>
+  path.join(
+    process.env.CLAUSROOM_HOST_ACTIVE_STATE_DIR
+      ? path.resolve(process.env.CLAUSROOM_HOST_ACTIVE_STATE_DIR)
+      : process.env.CLAUSROOM_STATE_DIR
+        ? path.resolve(process.env.CLAUSROOM_STATE_DIR)
+        : path.join(os.homedir(), '.clausroom'),
+    'active-room.json',
   );
 const TAILSCALE_ADMIN_URL = 'https://login.tailscale.com/admin/machines';
 
@@ -265,6 +275,59 @@ async function writeHostSession({ server, session_token }) {
   await fsp.writeFile(p, body, { mode: 0o600 });
 }
 
+// The streamlined SSH flow needs the room context on the remote project
+// machine as well as on the laptop that owns the browser/local forward.
+let cliActiveConnectionId = null;
+
+async function writeCliActiveRoom({ serverUrl, roomId, bridgeToken, humanName, agentName }) {
+  const file = CLI_ACTIVE_ROOM_FILE();
+  const dir = path.dirname(file);
+  await fsp.mkdir(dir, { recursive: true, mode: 0o700 });
+  const dirStat = await fsp.lstat(dir);
+  if (!dirStat.isDirectory() || dirStat.isSymbolicLink()) {
+    fail(`refusing unsafe Clausroom state directory: ${dir}`);
+  }
+  await fsp.chmod(dir, 0o700);
+  const connectionId = randomBytes(18).toString('base64url');
+  const state = {
+    v: 1,
+    connectionId,
+    pid: process.pid,
+    role: 'host',
+    serverUrl,
+    roomId,
+    bridgeToken,
+    humanName,
+    agentName,
+    createdAt: new Date().toISOString(),
+  };
+  const temp = `${file}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
+  try {
+    await fsp.writeFile(temp, `${JSON.stringify(state, null, 2)}\n`, {
+      mode: 0o600,
+      flag: 'wx',
+    });
+    await fsp.rename(temp, file);
+    await fsp.chmod(file, 0o600);
+    cliActiveConnectionId = connectionId;
+  } catch (err) {
+    await fsp.unlink(temp).catch(() => undefined);
+    throw err;
+  }
+}
+
+function clearCliActiveRoomSync() {
+  if (!cliActiveConnectionId) return;
+  const file = CLI_ACTIVE_ROOM_FILE();
+  try {
+    const state = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (state && state.connectionId === cliActiveConnectionId) fs.unlinkSync(file);
+  } catch {
+    /* missing/replaced state is not ours to remove */
+  }
+  cliActiveConnectionId = null;
+}
+
 // ---------------------------------------------------------------------------
 // server lifecycle (only used with --start)
 // ---------------------------------------------------------------------------
@@ -301,7 +364,10 @@ function registerCleanup() {
   };
   process.on('SIGINT', () => onSignal('SIGINT'));
   process.on('SIGTERM', () => onSignal('SIGTERM'));
-  process.on('exit', () => stopServerSync());
+  process.on('exit', () => {
+    stopServerSync();
+    clearCliActiveRoomSync();
+  });
 }
 
 /** Best-effort synchronous kill for the exit/signal path. */
@@ -1102,6 +1168,13 @@ async function runUp(flags) {
         humanName: studentName,
         agentName: studentAgentName,
       };
+      await writeCliActiveRoom({
+        serverUrl: baseUrl,
+        roomId: room.id,
+        bridgeToken: studentBridgeToken,
+        humanName: studentName,
+        agentName: studentAgentName,
+      });
       out(`CLAUSROOM_HOST_CONTEXT ${Buffer.from(JSON.stringify(context), 'utf8').toString('base64url')}`);
     } else {
       out('');

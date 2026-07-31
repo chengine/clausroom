@@ -47,6 +47,10 @@ clausroom project                 # Codex
 # clausroom project --agent claude
 ```
 
+With `host --ssh`, run `project` in a second SSH session on the machine that
+actually holds the project. The host command maintains matching mode-0600
+connection state on both the browser laptop and SSH target.
+
 `host` and `connect` stay running. `project` stores no raw token in the MCP
 configuration and sets its sole filesystem root to the current directory.
 The room credential is in a mode-0600 active connection file only for the

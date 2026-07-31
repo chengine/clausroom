@@ -375,7 +375,9 @@ export async function runHostCommand(options: HostCommandOptions): Promise<void>
   if (options.ssh) {
     validateSshTarget(options.ssh);
     const remoteDir = remoteDirectoryCommand(options.remoteDir ?? '~/StanfordMSL/clausroom');
-    const setup = options.skipSetup ? '' : 'npm install && npm run build && ';
+    const setup = options.skipSetup
+      ? ''
+      : 'npm install && npm run build && npm install -g ./apps/bridge && ';
     const remoteCommand =
       `cd -- ${remoteDir} && ${setup}` +
       `env CLAUSROOM_CLI_CONTEXT=1 AGENT_ROOM_PORT=${serverPort} ` +
