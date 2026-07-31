@@ -125,9 +125,9 @@ CLAUSROOM_LISTENING <actual-port>
 ```
 
 `AGENT_ROOM_PORT=0` is supported: the OS assigns an ephemeral port and the
-`CLAUSROOM_LISTENING` line reports the real port. Both lines are machine-readable
+`CLAUSROOM_LISTENING` line reports the real port. The line is machine-readable
 (single line, single space separator, nothing else on the line) — the smoke test
-parses them. `CLAUSROOM_LISTENING` is printed on **every** startup;
+parses it. `CLAUSROOM_LISTENING` is printed on **every** startup;
 `CLAUSROOM_BOOTSTRAP_INVITE` only when the DB was just bootstrapped.
 
 **Owner-lockout recovery.** On startup with a **non-empty** database, for each
@@ -768,7 +768,7 @@ learns from subsequent frames).
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `AGENT_ROOM_HOST` | `127.0.0.1` | Bind interface. Keep loopback; expose via Tailscale Serve. |
+| `AGENT_ROOM_HOST` | `127.0.0.1` | Bind interface. Keep loopback; expose via Tailscale Serve or direct peer mode. |
 | `AGENT_ROOM_PORT` | `3000` | Listen port. `0` allowed (ephemeral; see §2). |
 | `AGENT_ROOM_DB` | `./data/clausroom.sqlite` | SQLite file path (parent dirs auto-created). |
 | `AGENT_ROOM_ARTIFACT_DIR` | `./data/artifacts` | Artifact storage root (auto-created). |
@@ -1028,4 +1028,46 @@ CLAUSROOM_LISTENING <port>                   # every run, once listening
 MSG <room_id> <sender_id> <message_type>     # every accepted message
 ```
 
-Nothing else may be printed on lines starting with `CLAUSROOM_` or `MSG `.
+The server process prints no other lines beginning with `CLAUSROOM_` or `MSG `.
+The peer CLI has its own machine-readable lines below.
+
+## 15. Direct peer transport (BINDING)
+
+`clausroom-bridge peer host` creates a WebRTC offer and forwards accepted tunnel
+channels to one fixed Clausroom target. The target URL MUST use HTTP, MUST name
+only `127.0.0.1`, `localhost`, or `::1`, and MUST contain only a port and an
+optional `/` path.
+
+`clausroom-bridge peer join` accepts that offer, creates the answer, and—only
+after ICE, DTLS, and the peer session handshake succeed—listens on
+`127.0.0.1`. Port `0` means an OS-selected port. It MUST NOT bind the local proxy
+to a routable interface.
+
+The commands print these parseable lines:
+
+```text
+CLAUSROOM_PEER_OFFER clausroom-offer-v1.<opaque-base64url>
+CLAUSROOM_PEER_ANSWER clausroom-answer-v1.<opaque-base64url>
+CLAUSROOM_PEER_PATH direct [<local-candidate> -> <remote-candidate>]
+CLAUSROOM_PEER_READY <loopback-http-url>
+```
+
+Offer and answer values are single-line, versioned, ephemeral signaling
+capabilities. They contain SDP fingerprints, ICE credentials/candidates, a
+random session id, and all candidates gathered before output. They MUST be
+size-bounded and schema-validated before being passed to the WebRTC runtime.
+
+The host creates `clausroom-control-v1`, a reliable ordered data channel whose
+protocol is also `clausroom-control-v1`. The guest proves that it received the
+offer by echoing the version/session/role tuple, and the host acknowledges it.
+Only after that exchange may the host accept channels whose label begins
+`clausroom-tcp-v1:` and whose protocol is exactly `clausroom-tcp-v1`.
+
+Each tunnel channel represents one loopback TCP connection. Binary messages use
+a one-byte frame type (`data`, `end`, or `reset`) followed by data when
+applicable. Implementations MUST bound channel count and queued bytes, preserve
+TCP half-close ordering, and close malformed streams.
+
+STUN URLs may be configured for discovery. TURN URLs and selected `relay`
+candidates MUST be rejected. Thus, peer mode may fail when no direct ICE path
+exists; it MUST NOT silently introduce a data relay.

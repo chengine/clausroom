@@ -7,7 +7,8 @@ artifact policy, and approval model, and finishes with an honest list of what is
 
 Layers referenced below:
 
-- **Tailscale** — network layer: device sharing, grants/ACL, Serve (TLS).
+- **Network transport** — either Tailscale device sharing + Serve, or a
+  direct-only WebRTC/ICE data channel with manual offer/answer signaling.
 - **Server** (`apps/server`) — central enforcement: auth, room membership,
   pause/turn/rate limits, upload gates, logging.
 - **Bridge** (`apps/bridge`) — local enforcement on each human's machine:
@@ -18,10 +19,10 @@ Layers referenced below:
 
 | # | Invariant | Enforced by |
 |---|-----------|-------------|
-| 1 | Do not invite the collaborator into your whole tailnet | **Tailscale + operator**: use device sharing of the server machine only; `deploy/tailscale-policy.hujson` grants the guest `tcp:443` on `tag:agent-room-server` and nothing else, with policy `tests` to catch regressions. Not enforceable in app code. |
+| 1 | Do not invite the collaborator into your whole tailnet | **Tailscale mode:** use device sharing of the server machine only. **Peer mode:** no tailnet membership exists; a manually exchanged, ephemeral WebRTC description authorizes one peer session. |
 | 2 | Do not host the chatroom on your main personal laptop if avoidable | **Deploy**: `deploy/Dockerfile` + `docker-compose.yml` run the server as a non-root user in a container whose only writable mount is `./data:/data` — no home directory, no repo. The systemd unit adds `ProtectHome=read-only`. |
-| 3 | The collaborator reaches only the chatroom server, only port 443 | **Tailscale**: the grants file allows the guest `tcp:443` only; Serve terminates TLS and proxies to loopback. **Server**: binds `AGENT_ROOM_HOST=127.0.0.1` by default so the backend port is never on a routable interface. |
-| 4 | The host machine never initiates connections into the guest's machine | **Architecture**: the bridge is a stdio MCP process that makes outbound HTTPS/WSS calls to the server and listens on nothing. There is no server→bridge channel other than WS frames on a bridge-initiated socket. |
+| 3 | The collaborator reaches only the chatroom server, only one port | **Tailscale:** grants allow `tcp:443` only and Serve terminates TLS. **Peer:** Clausroom itself stays on `127.0.0.1`; the authenticated host tunnel accepts only the Clausroom data-channel protocol and maps it to one fixed, validated loopback target. It cannot select SSH, a network filesystem, or another address. |
+| 4 | The host machine never initiates arbitrary connections into the guest's machine | **Architecture**: normal bridges are outbound HTTP/WSS clients. In peer mode both sides explicitly participate in ICE and exchange packets only inside the authenticated WebRTC session; the guest exposes only a `127.0.0.1` proxy to its own browser/bridge. There is no general server→guest connection primitive. |
 | 5 | The server has no filesystem access to either repo | **Server design**: it reads/writes only `AGENT_ROOM_DB` and `AGENT_ROOM_ARTIFACT_DIR`. It stores messages and explicitly uploaded artifacts; there is no endpoint that reads arbitrary paths. **Deploy**: the container mounts only `/data`. |
 | 6 | Each bridge controls what its local agent can see/do; read-only by default | **Bridge**: `policy.read_only_default = true` in `bridge.toml`; `allow_agent_to_upload_files = false` by default; every tool call passes local policy checks before any network call. |
 | 7 | Code writes, shell commands, and file transfers above small limits require local human approval | **Bridge + server**: the bridge requires an approved `artifact_upload` approval for uploads over `max_upload_bytes_without_approval` (1 MiB) or when `require_human_approval_for_uploads` is set; the **server independently** re-enforces the gate for agent uploads (size > `AGENT_ROOM_REQUIRE_APPROVAL_BYTES`, secret-like filename, or archive → `403 approval_required`). Approvals are reviewed only by the requesting agent's own human (`reviewer_user_id = owner_user_id`); even the room owner cannot approve someone else's agent (`403 forbidden`). The bridge exposes no shell tool at all. |
@@ -121,13 +122,22 @@ now expire and count against a per-room storage quota (`AGENT_ROOM_ARTIFACT_RETE
 (`AGENT_ROOM_SESSION_TTL_DAYS`); and message bodies are now redacted against
 the shared secret patterns. What remains:
 
-- **No TLS in the app itself.** The server speaks plain HTTP on loopback;
-  Tailscale Serve provides TLS and tailnet-only exposure. If you bind to
-  `0.0.0.0` without Serve (as inside the Docker container), traffic on that hop
-  is unencrypted — keep the compose port mapping on `127.0.0.1`.
-- **Network posture is operator-enforced.** Nothing in the code can verify you
-  used device sharing instead of a tailnet invite, applied the grants file, or
-  avoided Funnel. Run the policy `tests` and the spec's verification checklist.
+- **Transport choice is configuration-sensitive.** Tailscale mode speaks plain
+  HTTP only on loopback and relies on Serve for TLS. Peer mode also keeps HTTP
+  on loopback; DTLS encrypts and authenticates the WebRTC hop. Do not override
+  the loopback bind and publish plain HTTP yourself.
+- **Network posture is partly operator-enforced.** Code cannot verify that
+  Tailscale users chose device sharing rather than a broad tailnet invite, or
+  that an institution permits direct peer traffic. Peer mode enforces its
+  loopback/fixed-target/relay-free boundaries in code, but administrators can
+  still observe and regulate STUN and ICE metadata. See `docs/PEER-CONNECT.md`.
+- **Direct ICE is not universal.** Symmetric NAT, VPN routing, or UDP policy can
+  prevent a path. TURN would improve connectivity by relaying traffic, but peer
+  mode rejects TURN and fails closed to preserve the no-data-intermediary model.
+- **Manual signaling is a capability exchange.** Offer/answer codes include
+  ephemeral candidates and fingerprints. A person who receives and completes
+  the exchange is being authorized for that peer session; use a trusted private
+  channel and restart if a code is misdirected.
 - **Message redaction is best-effort pattern matching.** Message bodies and
   the pinned room summary are scanned against `SECRET_CONTENT_PATTERNS` plus
   the clausroom token pattern (`arit_/arst_/arbt_` + 32 hex) and matches

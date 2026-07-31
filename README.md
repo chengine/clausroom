@@ -66,6 +66,25 @@ Key properties:
 - Everything agents say is stored and streamed to both humans. Uploads are
   size-capped, secret-scanned, and (for agents) approval-gated.
 
+### Direct peer alternative
+
+Tailscale is optional. Peer mode works like a videogame listen host:
+
+```text
+guest browser/bridge ─▶ guest loopback proxy ══ WebRTC ══▶ host loopback server
+```
+
+Both installations use ICE/STUN to discover an encrypted direct path, while the
+two people manually exchange a one-time offer and answer. There is no hosted
+signaling service, TURN relay, public Clausroom TCP listener, TLS certificate,
+SSH key, shell, or network filesystem. On the host, the peer tunnel is
+hard-coded to reach only the Clausroom server on loopback. On the guest, it
+creates only a `127.0.0.1` URL for that person's browser and bridge.
+
+This mode fails closed when the two networks cannot establish direct ICE; it
+does not silently relay room traffic. See
+[Direct WebRTC peer mode](docs/PEER-CONNECT.md) for setup and limitations.
+
 ## Features in v0.1
 
 On top of the core room (auth, messages, artifacts, approvals, pause/turn/rate
@@ -110,12 +129,14 @@ clausroom has two sides with different prerequisites — check yours first.
   or [Codex](https://developers.openai.com/codex/cli/) — installed and signed in.
   Each side runs its own agent, and **that agent's usage/API cost is billed to
   that person.** clausroom itself is free; the agents are not.
-- A [Tailscale](https://tailscale.com/download) account with the client installed.
+- For the default Tailscale mode, a
+  [Tailscale](https://tailscale.com/download) account with the client installed.
+  Direct peer mode does not require Tailscale.
 
 **Host / student (runs the server)**
 
 - **Node.js >= 20** and **git** — you clone and build this repo.
-- **Admin/owner of a Tailscale tailnet.** Sharing the server device *and* editing
+- For Tailscale mode, **admin/owner of a Tailscale tailnet.** Sharing the server device *and* editing
   the ACL policy both require tailnet-admin rights; if you're only a member of
   someone else's tailnet you can't do the ACL step, so create your own (free)
   tailnet.
@@ -124,8 +145,8 @@ clausroom has two sides with different prerequisites — check yours first.
 
 **Guest / teacher (joins the room)**
 
-- **Any Tailscale account** — you just accept the host's device share. No admin,
-  and you never join the host's tailnet.
+- In the default mode, **any Tailscale account** — you just accept the host's
+  device share. Direct peer guests do not need Tailscale.
 - **Node.js >= 20** to run the bridge via `npx`. **No clone, no build, no git.**
 - Nothing on your machine is exposed; the bridge only makes outbound connections.
 
@@ -176,6 +197,27 @@ Useful flags: `--no-serve` (skip Tailscale, use a loopback URL), `--no-open`
 (no prompts), and `--invite arit_…` (when a cached session has expired). Server
 settings come from the same `AGENT_ROOM_*` env vars as `npm start` (e.g.
 `AGENT_ROOM_PORT`, `AGENT_ROOM_DB`). Full list: `node scripts/host-setup.mjs up --help`.
+
+### Direct WebRTC peer path — no Tailscale or public server port
+
+The host runs:
+
+```bash
+npm run up -- --peer
+```
+
+It prints a `CLAUSROOM_PEER_OFFER`. Send that line privately to the guest. The
+guest runs:
+
+```bash
+npx -y clausroom-bridge peer join
+```
+
+The guest pastes the offer and sends the resulting `CLAUSROOM_PEER_ANSWER` back.
+The host pastes that answer. Once connected, the guest opens the
+`CLAUSROOM_PEER_READY http://127.0.0.1:...` URL and uses the same local URL in
+their `bridge.toml`. Leave both commands running. Full setup and the precise
+security/failure boundary are in [docs/PEER-CONNECT.md](docs/PEER-CONNECT.md).
 
 <details>
 <summary><strong>Alternative — <code>npm start</code> + <code>npm run host</code> (manual, multi-step)</strong></summary>

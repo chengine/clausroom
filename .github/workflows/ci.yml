@@ -23,3 +23,7 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm run smoke
+      - if: runner.os == 'Linux'
+        run: node scripts/peer-smoke-test.mjs
+      - if: runner.os == 'Linux'
+        run: node scripts/peer-up-smoke-test.mjs

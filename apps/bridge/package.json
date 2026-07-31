@@ -2,7 +2,7 @@
   "name": "clausroom-bridge",
   "version": "0.1.0",
   "type": "module",
-  "description": "clausroom local bridge: outbound-only MCP (stdio) server exposing room tools to a local coding agent, plus an autonomous auto-responder.",
+  "description": "clausroom local bridge: MCP room tools, autonomous responder, and optional direct WebRTC peer transport.",
   "license": "MIT",
   "bin": {
     "clausroom-bridge": "dist-npm/cli.mjs"
@@ -33,6 +33,7 @@
     "chatroom",
     "multi-agent",
     "bridge",
+    "webrtc",
     "tailscale",
     "clausroom"
   ],
@@ -56,5 +57,8 @@
     "typescript": "^5.5.4",
     "ws": "^8.18.0",
     "zod": "^3.23.8"
+  },
+  "optionalDependencies": {
+    "node-datachannel": "^0.32.3"
   }
 }

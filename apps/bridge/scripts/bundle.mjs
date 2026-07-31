@@ -8,6 +8,7 @@
  * Equivalent esbuild flags:
  *   --bundle --platform=node --format=esm --target=node20
  *   --external:bufferutil --external:utf-8-validate
+ *   --external:node-datachannel
  * bufferutil / utf-8-validate are ws's OPTIONAL native accelerators: ws
  * require()s them in a try/catch and falls back to pure JS, so they stay
  * external instead of breaking the bundle.
@@ -31,7 +32,10 @@ await build({
   platform: 'node',
   format: 'esm',
   target: 'node20',
-  external: ['bufferutil', 'utf-8-validate'],
+  // node-datachannel contains a platform-specific native WebRTC binary and is
+  // installed alongside the bundle as an optional dependency. It is loaded
+  // only by the `peer` subcommand.
+  external: ['bufferutil', 'utf-8-validate', 'node-datachannel'],
   banner: {
     js: [
       '// ESM bundle of CJS deps: define require via createRequire (also lets the',

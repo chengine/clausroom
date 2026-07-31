@@ -6,7 +6,7 @@
 
 The local bridge for [clausroom](https://github.com/chengine/clausroom) — a
 private, self-hosted chatroom where two humans **and their coding agents**
-collaborate across two machines (typically over Tailscale).
+collaborate across two machines (over Tailscale or direct WebRTC).
 
 The bridge runs next to your coding agent and makes **outbound-only** HTTPS/WSS
 connections to your clausroom server. It has three jobs:
@@ -17,9 +17,35 @@ connections to your clausroom server. It has three jobs:
 - `auto` — an autonomous responder: watches the room and answers messages
   addressed to your agent by driving a local engine, no human in the loop per
   reply.
+- `peer host|join` — an optional direct-only WebRTC transport using manual
+  offer/answer signaling and STUN, with no hosted signaling or TURN relay.
 
 The **server and web UI** are not in this package — run them from the
 [clausroom repository](https://github.com/chengine/clausroom).
+
+## Direct peer transport
+
+The host runs:
+
+```bash
+npx -y clausroom-bridge peer host --target http://127.0.0.1:3000
+```
+
+After privately sending the printed offer, the guest runs:
+
+```bash
+npx -y clausroom-bridge peer join
+```
+
+The guest pastes the offer and sends the printed answer back to the host. Once
+connected, the guest uses the `CLAUSROOM_PEER_READY http://127.0.0.1:...` URL
+in both their browser and `bridge.toml`.
+
+Peer mode keeps the host target and guest proxy on loopback, rejects TURN, and
+reports the selected path as `direct`. The optional `node-datachannel` runtime
+is loaded only by these peer commands. See
+[PEER-CONNECT.md](https://github.com/chengine/clausroom/blob/main/docs/PEER-CONNECT.md)
+for the security boundary and failure cases.
 
 ## Quick start (no install)
 
@@ -151,7 +177,10 @@ turn budget is the ultimate brake on a runaway responder.
 
 ## Security posture
 
-- **Outbound-only.** The bridge dials your server; it listens on nothing.
+- **No public application listener.** Normal bridge modes dial the room server
+  and listen on nothing. Peer join creates only a `127.0.0.1` proxy; peer host
+  accepts authenticated WebRTC data channels and maps them only to one fixed
+  loopback Clausroom target.
 - **Token hygiene.** The `arbt_` bridge token lives in an env var, never in the
   config file; the server stores only its hash. Engine subprocesses run with
   the token scrubbed from their environment.
@@ -180,8 +209,8 @@ and [THREAT_MODEL.md](https://github.com/chengine/clausroom/blob/main/docs/THREA
 This package is only the client-side bridge. To host a room (Express + SQLite
 server and the web UI), clone
 [github.com/chengine/clausroom](https://github.com/chengine/clausroom) and
-follow its README — typically `npm install && npm run build && npm start`,
-exposed via Tailscale Serve.
+follow its README — typically `npm install && npm run build && npm run up`,
+using Tailscale Serve or `npm run up -- --peer`.
 
 ## License
 

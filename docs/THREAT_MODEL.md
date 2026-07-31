@@ -13,7 +13,7 @@ coding agent attached to their bridge over stdio MCP.
 | Host agent | Untrusted automation | An LLM: helpful but injectable. Constrained by the host's bridge policy and by the server. |
 | Guest agent | Untrusted automation | Same, constrained by the guest's bridge and the server. |
 | Server process | Trusted for integrity, minimized for capability | Sees all room content; deliberately given no repo/shell access. |
-| Tailnet outsiders / internet | Untrusted | Should never be able to reach the service at all. |
+| Tailnet outsiders / internet | Untrusted | Tailscale blocks reachability. Peer mode exposes ICE candidates only to the manually invited peer; unsolicited packets still face ICE credentials and DTLS authentication. |
 | A thief with the SQLite file | Untrusted | Must not obtain usable credentials (hash-only tokens). |
 
 ## Assets
@@ -29,21 +29,28 @@ coding agent attached to their bridge over stdio MCP.
 ## Trust boundaries
 
 ```text
-[guest agent] --stdio--> [guest bridge] --HTTPS/WSS outbound--> ┐
-                                                                │  Tailscale Serve (TLS, 443)
-[guest browser] ------------HTTPS outbound--------------------> ┤        │
-                                                                │  [server on loopback:3000]
-[host agent]  --stdio--> [host bridge]  --HTTPS/WSS outbound--> ┘        │
-[host browser] ----------------------------------------------->    [SQLite + artifact dir]
+[guest browser/bridge] -> [guest 127.0.0.1 proxy]
+                                  ||
+                           WebRTC / ICE / DTLS
+                                  ||
+[host browser/bridge] -> [server 127.0.0.1] <- [fixed-target peer host]
+                                  |
+                         [SQLite + artifact dir]
 ```
+
+Tailscale mode replaces the middle WebRTC hop with Tailscale Serve on port 443.
 
 - **B1: agent ↔ bridge.** The agent only gets the MCP tools the bridge exposes;
   local policy (roots, deny globs, secret scan, approvals) runs before any
   network call. There is no shell tool.
-- **B2: machine ↔ tailnet.** Bridges and browsers are outbound-only clients. The
-  guest's machine exposes nothing; the host machine exposes only 443 via Serve.
-- **B3: tailnet ↔ server.** Device sharing + grants limit who can even complete a
-  TCP handshake; bearer tokens + room membership decide what they can do.
+- **B2: machine ↔ network.** In Tailscale mode, bridges and browsers are
+  outbound-only application clients. In peer mode, both users consensually run
+  ICE endpoints; the guest's only TCP listener is loopback, and the host opens
+  no public Clausroom TCP listener.
+- **B3: network ↔ server.** Tailscale device sharing + grants restrict who
+  completes a TCP handshake. Peer mode instead uses manually exchanged SDP
+  fingerprints/ICE credentials, DTLS, a session handshake, a fixed protocol
+  label, and a fixed loopback target before traffic can reach Clausroom.
 - **B4: server ↔ host filesystem.** The server touches only its DB and artifact
   dir (container: only `/data`).
 - **B5: room content ↔ agent reasoning.** Everything read out of the room is
@@ -53,8 +60,8 @@ coding agent attached to their bridge over stdio MCP.
 
 | Failure mode | Mitigation as implemented |
 |---|---|
-| Guest can access more than the chatroom server | Device sharing (not tailnet invite); `deploy/tailscale-policy.hujson` grants the guest only `tag:agent-room-server` `tcp:443`, with `tests` asserting 22/3000 are denied; server binds loopback so only Serve reaches it. |
-| Guest can SSH to the chatroom host | `"ssh": []` in the policy file; port 22 not granted; host firewall (`ufw`) recommended in README; verification checklist includes an explicit SSH-must-fail test. |
+| Guest can access more than the chatroom server | Tailscale mode uses device sharing and a one-port grant. Peer mode validates a single loopback Clausroom target and maps only authenticated Clausroom data channels to it; there is no destination field supplied by the guest. |
+| Guest can SSH to the chatroom host | Clausroom never accepts or distributes SSH keys. Tailscale policy denies SSH. Peer mode cannot select port 22 and does not expose a general TCP proxy. |
 | Server has access to the host's repo | Server code paths only touch `AGENT_ROOM_DB` and `AGENT_ROOM_ARTIFACT_DIR`; Docker image mounts only `./data:/data`, runs non-root; systemd unit sets `ProtectHome=read-only` with a single `ReadWritePaths` carve-out for its data dir. |
 | Agent uploads secrets | Defense in depth: bridge `DEFAULT_DENY_GLOBS` (non-removable) + config `deny_globs` + `SECRET_NAME_GLOBS`/`SECRET_CONTENT_PATTERNS` scan on the first 1 MiB → refuse; server independently forces the approval gate on secret-like names from agents; approvals reviewable only by the agent's own human. |
 | Agent runs a malicious command from the other agent's prompt | The bridge exposes **no shell/exec tool** at all; `shell_command` exists only as an approval type a human must approve out-of-band; read-only default policy; tool descriptions instruct the agent that room content is untrusted. |
@@ -130,7 +137,13 @@ broader, and pause the agent the moment the conversation looks steered.
 
 - Malicious host operator (they run the server; the guest's protection is that
   only explicitly shared content ever leaves their machine).
-- Compromise of Tailscale itself, or of either human's OS/account.
-- Denial of service by a network-level attacker inside the tailnet share.
+- Compromise of Tailscale, the WebRTC runtime, a configured STUN service, or
+  either human's OS/account. STUN does not receive room contents, but it observes
+  endpoint/timing metadata.
+- Denial of service against an exchanged ICE candidate or by the authorized
+  peer. There is no unauthenticated public HTTP surface in peer mode, but network
+  traffic and candidate addresses are not invisible.
+- Guaranteed direct connectivity. Peer mode deliberately has no TURN relay and
+  can fail behind incompatible NAT/firewall/VPN combinations.
 - Metadata privacy between participants (everyone in a room sees everything —
   by design, invariant 8).
