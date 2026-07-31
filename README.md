@@ -200,7 +200,7 @@ settings come from the same `AGENT_ROOM_*` env vars as `npm start` (e.g.
 
 ### Direct WebRTC peer path — no Tailscale or public server port
 
-Install the `clausroom` command once. From a source checkout:
+Install the `clausroom` command once on both machines. From a source checkout:
 
 ```bash
 npm run install:cli
@@ -209,24 +209,11 @@ npm run install:cli
 Once the npm package is published, a machine that does not need the server
 source can instead use `npm install -g clausroom-bridge`.
 
-The host command can run from any directory. If you are on the server machine:
+The host command can run from any directory:
 
 ```bash
 clausroom host
 ```
-
-If the server is a machine you normally SSH into, run this on your laptop:
-
-```bash
-clausroom host --ssh admin@171.64.160.63
-```
-
-That keeps the server loopback-only, creates an SSH **local** forward for the
-host's laptop browser, runs the remote checkout at
-`~/StanfordMSL/clausroom`, and performs `npm install` plus `npm run build`
-and installs the `clausroom` command on that remote machine before launch.
-Pass `--remote-dir /another/path` when needed, or `--skip-setup` after a
-known-good build/global install.
 
 The host sends the printed `CLAUSROOM_PEER_OFFER` privately. From any directory,
 the other person runs:
@@ -235,9 +222,11 @@ the other person runs:
 clausroom connect
 ```
 
-The guest pastes the offer and sends the resulting `CLAUSROOM_PEER_ANSWER` back.
-The host pastes that answer. Each command opens that person's local browser and
-stays running.
+The guest does not enter an IP address or public URL. They paste the offer,
+which contains the host's temporary ICE connection candidates, encryption
+fingerprint, and room invitation. The guest sends the resulting
+`CLAUSROOM_PEER_ANSWER` back, and the host pastes that answer. Each command
+opens that person's local browser and stays running.
 
 Finally, each person opens a second terminal in the project their agent may
 access:
@@ -247,11 +236,6 @@ cd /path/to/project
 clausroom project                 # Codex
 # or: clausroom project --agent claude
 ```
-
-For an SSH-hosted project, run those two lines in a second SSH session on the
-host machine. The original laptop terminal keeps `clausroom host --ssh ...`
-running and owns the browser/local forward; the remote host command maintains a
-separate mode-0600 active context so its local coding agent can attach.
 
 This generated MCP configuration contains no token and names exactly the
 current directory as its sole filesystem root. The active room credential is
@@ -510,6 +494,41 @@ From the spec's access-boundary table (`docs/SECURITY.md` and
 | Host (student) | The chatroom web app; the guest agent's messages in the room; artifacts the guest explicitly approves/uploads | The guest's computer, filesystem, repo, shell, or raw agent memory |
 | Server | Messages, artifact files, approval records, token hashes | Either repo, either agent's memory, either machine's shell; raw tokens (hash-only storage) |
 | Either agent | Room tools via its local bridge, within local policy | Files outside configured roots; deny-globbed/secret-like files; uploads without approval; any remote execution |
+
+## FAQ
+
+### Can the Clausroom host be headless while I use its UI from my laptop?
+
+Yes. The headless machine remains the actual Clausroom host: it runs the
+server, database, artifact store, WebRTC peer, project, and coding agent. Your
+laptop runs only the SSH controller/local forward and browser.
+
+Install the `clausroom` command on your laptop once, then run this from any
+local directory:
+
+```bash
+clausroom host --ssh admin@171.64.160.63
+```
+
+This starts Clausroom in the remote checkout at
+`~/StanfordMSL/clausroom`, forwards laptop
+`127.0.0.1:43000` to the host's loopback-only server, and opens the UI in the
+laptop browser. It also performs the remote dependency install, build, and
+global CLI install. Use `--remote-dir /another/path` when necessary, or
+`--skip-setup` after a known-good build and CLI install.
+
+Keep that laptop command running. In a second SSH session, attach the
+host-side agent from the project directory on the headless machine:
+
+```bash
+ssh admin@171.64.160.63
+cd /path/to/project
+clausroom project
+```
+
+The launcher maintains separate mode-0600 active room contexts on the laptop
+and headless project machine. The guest workflow remains unchanged:
+`clausroom connect`, followed by `clausroom project` from the guest's project.
 
 ## Troubleshooting
 
