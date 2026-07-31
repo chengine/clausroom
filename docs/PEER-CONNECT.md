@@ -38,29 +38,19 @@ Install the global command once on each machine. From this source checkout:
 npm run install:cli
 ```
 
-The host can launch from any directory:
+Each person launches from the repository that their own coding agent may
+access. The host runs:
 
 ```bash
+cd /path/to/host-repository
 clausroom host
 ```
 
-If the host server is a machine you normally SSH into, launch it from the
-laptop where you want the browser:
-
-```bash
-clausroom host --ssh admin@171.64.160.63
-```
-
-The SSH form uses a loopback-only local forward (default laptop port 43000) and
-the remote source checkout at `~/StanfordMSL/clausroom`. Override it with
-`--remote-dir`; use `--skip-setup` to omit the otherwise automatic
-`npm install`, build, and remote global CLI install.
-
 After room creation, the command prints one long line beginning with
-`CLAUSROOM_PEER_OFFER`. Send the complete line privately. The guest can launch
-from any directory:
+`CLAUSROOM_PEER_OFFER`. Send the complete line privately. The guest runs:
 
 ```bash
+cd /path/to/guest-repository
 clausroom connect
 ```
 
@@ -69,26 +59,41 @@ Paste the offer when prompted. Send the resulting
 still-running host command.
 
 When ICE and peer authentication succeed, each person's browser opens against
-a loopback URL. Both commands stay running. In a second terminal, each person
-runs:
+a loopback URL. Both commands stay running and automatically attach the
+directory from which they were launched. Codex is configured by default; use
+`--agent claude` for Claude Code. Agent uploads default to off; enabling
+`--allow-agent-uploads` still requires human approval. Use `--no-project` for
+chat without attaching a project, or run `clausroom project` from a different
+repository to switch while the connection is running.
+
+The generated MCP configuration uses the current directory as its only
+filesystem root and contains no credential. It reads the room-scoped token from
+`~/.clausroom/active-room.json`, which is mode 0600, owned by the running
+`host`/`connect` command, and removed at shutdown. Browser session tokens travel
+in a URL fragment (not an HTTP request) and the UI removes the fragment
+immediately after storing it locally.
+
+### Optional headless-host browser wrapper
+
+If the host server is a machine you normally SSH into, the simplest workflow
+is to open an SSH local forward from the laptop, change into the remote project,
+and run `clausroom host` there. The laptop needs only SSH and a browser; see the
+main README FAQ.
+
+If Clausroom is also installed on the laptop, this convenience wrapper is
+available:
 
 ```bash
-cd /path/to/the/project
-clausroom project                 # configures Codex
-# or: clausroom project --agent claude
+clausroom host --ssh admin@171.64.160.63
 ```
 
-For an SSH-hosted project, run `project` in a second SSH session on the remote
-host. The first laptop terminal continues to own the host command, browser, and
-local forward. The launcher writes separate mode-0600 active contexts on the
-laptop and remote project machine, both removed on normal shutdown.
-
-`project` uses the current directory as the only filesystem root, defaults
-agent uploads to off, and writes a credential-free MCP configuration. It reads
-the room-scoped token from `~/.clausroom/active-room.json`, which is mode 0600,
-owned by the running `host`/`connect` command, and removed at shutdown. Browser
-session tokens travel in a URL fragment (not an HTTP request) and the UI removes
-the fragment immediately after storing it locally.
+It uses a loopback-only local forward (default laptop port 43000) and the remote
+Clausroom source checkout at `~/StanfordMSL/clausroom`. Override the source
+checkout with `--remote-dir`; use `--skip-setup` to omit automatic `npm install`,
+build, and remote global CLI install. Because the laptop's current directory
+does not identify a remote project, the wrapper skips automatic project
+attachment. Run `clausroom project` from the desired repository in a second
+SSH session.
 
 The offer contains ephemeral connection information plus the guest's one-time
 browser invite and room-scoped bridge credential. Anyone who obtains it before

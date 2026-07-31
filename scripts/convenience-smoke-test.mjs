@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
  * End-to-end test for the directory-independent command flow:
- *   clausroom host -> clausroom connect -> clausroom project
+ *   (cd host-project && clausroom host)
+ *   (cd guest-project && clausroom connect)
  *
  * It uses separate state directories for the two simulated users, disables
  * STUN for deterministic same-machine ICE, and verifies that the generated
@@ -107,6 +108,21 @@ async function waitForFile(file, timeoutMs = 15_000) {
   throw new Error(`timed out waiting for ${file}`);
 }
 
+async function waitForProjectConfig(stateDirectory, timeoutMs = 15_000) {
+  const directory = path.join(stateDirectory, 'projects');
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const files = await fs.readdir(directory);
+      if (files.length === 1) return path.join(directory, files[0]);
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`timed out waiting for one project config in ${directory}`);
+}
+
 async function waitForExit(child, timeoutMs = 20_000) {
   if (child.exitCode !== null || child.signalCode !== null) return;
   await Promise.race([
@@ -149,11 +165,13 @@ try {
       '--skip-setup',
       '--no-stun',
       '--no-open',
+      '--agent',
+      'none',
       '--server-port',
       String(serverPort),
     ],
     {
-      cwd: tempRoot,
+      cwd: hostProjectRoot,
       env: {
         AGENT_ROOM_DB: path.join(tempRoot, 'clausroom.sqlite'),
         AGENT_ROOM_ARTIFACT_DIR: path.join(tempRoot, 'artifacts'),
@@ -169,14 +187,14 @@ try {
   assert.match(decodedOffer.room.inviteToken, /^arit_[0-9a-f]{32}$/);
   assert.match(decodedOffer.room.bridgeToken, /^arbt_[0-9a-f]{32}$/);
 
-  guest = start(['connect', '--no-stun', '--no-open'], {
-    cwd: tempRoot,
+  guest = start(['connect', '--no-stun', '--no-open', '--agent', 'none'], {
+    cwd: projectRoot,
     env: { CLAUSROOM_STATE_DIR: guestState },
   });
   guestLines = lineBus(guest.stdout, 'guest');
-  guest.stdin.write(`${offer}\n`);
+  guest.stdin.write(`CLAUSROOM_PEER_OFFER ${offer}\n`);
   const answer = await guestLines.wait('CLAUSROOM_PEER_ANSWER');
-  host.stdin.write(`${answer}\n`);
+  host.stdin.write(`CLAUSROOM_PEER_ANSWER ${answer}\n`);
 
   const [localUrl] = await Promise.all([
     guestLines.wait('CLAUSROOM_PEER_READY'),
@@ -212,25 +230,13 @@ try {
   });
   assert.equal(reusedInvite.status, 401);
 
-  const project = start(['project', '--agent', 'none'], {
-    cwd: projectRoot,
-    env: { CLAUSROOM_STATE_DIR: guestState },
-  });
-  const projectOutput = [];
-  project.stdout.setEncoding('utf8');
-  project.stdout.on('data', (chunk) => projectOutput.push(chunk));
-  await waitForExit(project);
-  assert.equal(project.exitCode, 0);
-  assert.match(projectOutput.join(''), /Filesystem access is limited/);
-
-  const projectFiles = await fs.readdir(path.join(guestState, 'projects'));
-  assert.equal(projectFiles.length, 1);
-  const config = await fs.readFile(path.join(guestState, 'projects', projectFiles[0]), 'utf8');
+  const guestConfigPath = await waitForProjectConfig(guestState);
+  const config = await fs.readFile(guestConfigPath, 'utf8');
   assert.match(config, new RegExp(`roots = \\[${JSON.stringify(projectRoot).replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}\\]`));
   assert.match(config, /allow_agent_to_upload_files = false/);
   assert.doesNotMatch(config, /(?:arit|arbt|arst)_/);
 
-  const check = start(['check', '--config', path.join(guestState, 'projects', projectFiles[0])], {
+  const check = start(['check', '--config', guestConfigPath], {
     cwd: projectRoot,
     env: { AGENT_ROOM_BRIDGE_TOKEN: decodedOffer.room.bridgeToken },
   });
@@ -240,6 +246,13 @@ try {
   await waitForExit(check);
   assert.equal(check.exitCode, 0);
   assert.match(checkOutput.join(''), /All checks passed/);
+
+  const localHostConfig = await fs.readFile(await waitForProjectConfig(hostState), 'utf8');
+  assert.match(
+    localHostConfig,
+    new RegExp(JSON.stringify(hostProjectRoot).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+  );
+  assert.doesNotMatch(localHostConfig, /(?:arit|arbt|arst)_/);
 
   // Simulate `clausroom project` on the SSH target while host/browser control
   // remains in the outer process on the laptop.

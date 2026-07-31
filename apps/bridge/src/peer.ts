@@ -192,7 +192,12 @@ export function decodePeerRoomInvite(encoded: string): PeerRoomInvite {
 }
 
 function decodeSignal(raw: string, expectedKind: PeerSignal['kind']): PeerSignal {
-  const text = raw.trim();
+  const machinePrefix =
+    expectedKind === 'offer' ? 'CLAUSROOM_PEER_OFFER ' : 'CLAUSROOM_PEER_ANSWER ';
+  const trimmed = raw.trim();
+  const text = trimmed.startsWith(machinePrefix)
+    ? trimmed.slice(machinePrefix.length).trim()
+    : trimmed;
   if (text.length > SIGNAL_MAX_BYTES * 2) {
     throw new Error(`Clausroom ${expectedKind} code is too large`);
   }

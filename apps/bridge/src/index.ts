@@ -94,6 +94,14 @@ async function runCheck(configPath: string | undefined): Promise<number> {
 }
 
 const program = new Command();
+type ProjectAgent = 'codex' | 'claude' | 'none';
+
+function parseProjectAgent(value: string): ProjectAgent {
+  if (value !== 'codex' && value !== 'claude' && value !== 'none') {
+    throw new Error('--agent must be codex, claude, or none');
+  }
+  return value;
+}
 
 program
   .name('clausroom')
@@ -106,7 +114,7 @@ program
 program
   .command('host')
   .description(
-    'Start a secure direct room from any directory, locally or through an SSH local forward.',
+    'From a project directory, start a secure direct room and attach that project.',
   )
   .option('--ssh <target>', 'run the Clausroom source checkout on [user@]host')
   .option('--repo <path>', 'local Clausroom source checkout')
@@ -117,6 +125,12 @@ program
   .option('--host-name <name>', 'host participant display name')
   .option('--guest-name <name>', 'guest participant display name')
   .option('--skip-setup', 'skip dependency install, build, and remote CLI install')
+  .option('--agent <agent>', 'coding agent to configure: codex, claude, or none', parseProjectAgent, 'codex')
+  .option(
+    '--allow-agent-uploads',
+    'allow the agent to propose files from this project (human approval is still required)',
+  )
+  .option('--no-project', 'do not attach the current directory as a project')
   .option('--no-stun', 'disable STUN and try host candidates only')
   .option('--no-open', 'do not open the local browser automatically')
   .action(
@@ -130,6 +144,9 @@ program
       hostName?: string;
       guestName?: string;
       skipSetup?: boolean;
+      agent?: ProjectAgent;
+      allowAgentUploads?: boolean;
+      project?: boolean;
       stun?: boolean;
       open?: boolean;
     }) => {
@@ -146,7 +163,7 @@ program
 program
   .command('connect')
   .description(
-    'Paste a combined room offer, create a direct encrypted connection, and open the local UI.',
+    'From a project directory, connect to a direct room and attach that project.',
   )
   .option('--offer-file <path>', 'read the combined offer from a file')
   .option('--listen-port <port>', 'local-only browser proxy port; 0 chooses a free port', (value) => Number(value), 0)
@@ -155,12 +172,21 @@ program
     value,
   ])
   .option('--no-stun', 'disable STUN and try host candidates only')
+  .option('--agent <agent>', 'coding agent to configure: codex, claude, or none', parseProjectAgent, 'codex')
+  .option(
+    '--allow-agent-uploads',
+    'allow the agent to propose files from this project (human approval is still required)',
+  )
+  .option('--no-project', 'do not attach the current directory as a project')
   .option('--no-open', 'do not open the browser automatically')
   .action(
     async (opts: {
       offerFile?: string;
       listenPort?: number;
       stun?: string[] | boolean;
+      agent?: ProjectAgent;
+      allowAgentUploads?: boolean;
+      project?: boolean;
       open?: boolean;
     }) => {
       try {
@@ -169,6 +195,9 @@ program
           offerFile: opts.offerFile,
           listenPort: opts.listenPort,
           stunUrls: opts.stun === false ? [] : Array.isArray(opts.stun) ? opts.stun : undefined,
+          agent: opts.agent,
+          allowAgentUploads: opts.allowAgentUploads,
+          project: opts.project,
           open: opts.open,
         });
       } catch (err) {
@@ -183,19 +212,14 @@ program
   .description(
     'Attach the active room to a coding agent, limiting Clausroom file access to the current directory.',
   )
-  .option('--agent <agent>', 'coding agent to configure: codex, claude, or none', (value) => {
-    if (value !== 'codex' && value !== 'claude' && value !== 'none') {
-      throw new Error('--agent must be codex, claude, or none');
-    }
-    return value;
-  }, 'codex')
+  .option('--agent <agent>', 'coding agent to configure: codex, claude, or none', parseProjectAgent, 'codex')
   .option(
     '--allow-agent-uploads',
     'allow the agent to propose files from this project (human approval is still required)',
   )
   .action(
     async (opts: {
-      agent: 'codex' | 'claude' | 'none';
+      agent: ProjectAgent;
       allowAgentUploads?: boolean;
     }) => {
       try {

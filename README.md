@@ -209,16 +209,19 @@ npm run install:cli
 Once the npm package is published, a machine that does not need the server
 source can instead use `npm install -g clausroom-bridge`.
 
-The host command can run from any directory:
+Each person first changes into the repository that their own coding agent may
+access. The room owner runs:
 
 ```bash
+cd /path/to/host-repository
 clausroom host
 ```
 
-The host sends the printed `CLAUSROOM_PEER_OFFER` privately. From any directory,
-the other person runs:
+The host sends the complete printed `CLAUSROOM_PEER_OFFER ...` line privately.
+On the other machine, the guest runs:
 
 ```bash
+cd /path/to/guest-repository
 clausroom connect
 ```
 
@@ -226,23 +229,18 @@ The guest does not enter an IP address or public URL. They paste the offer,
 which contains the host's temporary ICE connection candidates, encryption
 fingerprint, and room invitation. The guest sends the resulting
 `CLAUSROOM_PEER_ANSWER` back, and the host pastes that answer. Each command
-opens that person's local browser and stays running.
+opens that person's local browser, attaches that person's current directory,
+and stays running. It configures Codex by default; use `--agent claude` for
+Claude Code. Agent uploads are disabled unless `--allow-agent-uploads` is
+passed, and the existing human-approval gates still apply when enabled.
 
-Finally, each person opens a second terminal in the project their agent may
-access:
-
-```bash
-cd /path/to/project
-clausroom project                 # Codex
-# or: clausroom project --agent claude
-```
-
-This generated MCP configuration contains no token and names exactly the
-current directory as its sole filesystem root. The active room credential is
-held in `~/.clausroom/active-room.json` with mode 0600 only while
-`host`/`connect` is running. Agent uploads are disabled unless
-`--allow-agent-uploads` is passed; the existing human-approval gates still
-apply when enabled.
+The generated MCP configuration contains no token and names exactly the
+command's current directory as its sole filesystem root. The active room
+credential is held in `~/.clausroom/active-room.json` with mode 0600 only while
+`host`/`connect` is running. Use `clausroom project` from another directory
+only if you want to switch repositories while the connection is running. Use
+`--no-project` on `host` or `connect` for transport and chat without attaching
+a coding project.
 
 The combined offer is a bearer invitation: it now contains the guest's
 single-use browser invite and room-scoped agent credential as well as ICE
@@ -510,9 +508,11 @@ From the laptop, open an SSH session with a loopback-only local forward:
 ssh -L 127.0.0.1:3000:127.0.0.1:3000 admin@171.64.160.63
 ```
 
-In that remote shell, start the host from any directory:
+In that remote shell, change into the repository the host-side agent may access
+and start the host:
 
 ```bash
+cd /path/to/host-repository
 clausroom host
 ```
 
@@ -521,23 +521,17 @@ The command prints a one-time browser URL beginning with
 open a browser. Open that exact URL in the laptop browser; the SSH forward
 carries it to the headless server without exposing a public application port.
 
-Keep the forwarded SSH/host command running. In a second SSH session, attach
-the host-side agent from the project directory on the headless machine:
-
-```bash
-ssh admin@171.64.160.63
-cd /path/to/project
-clausroom project
-```
-
-The headless host maintains its mode-0600 active room context; the laptop keeps
-only its browser session. The guest workflow remains unchanged:
-`clausroom connect`, followed by `clausroom project` from the guest's project.
+Keep the forwarded SSH/host command running. The `host` command automatically
+attaches the directory it was launched from. The headless host maintains its
+mode-0600 active room context; the laptop keeps only its browser session. The
+guest likewise changes into their own repository and runs `clausroom connect`.
 
 If Clausroom is installed on the laptop, the optional
 `clausroom host --ssh admin@171.64.160.63` wrapper combines the SSH forward,
 remote setup, host launch, and browser handoff into one command, but it is not
-required.
+required. Because that wrapper cannot infer a repository path from the
+laptop's current directory, use a second SSH shell and run `clausroom project`
+from the desired remote repository, or use the primary workflow above.
 
 ## Troubleshooting
 

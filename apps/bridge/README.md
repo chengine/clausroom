@@ -20,42 +20,48 @@ connections to your clausroom server. It has three jobs:
 - `peer host|join` — an optional direct-only WebRTC transport using manual
   offer/answer signaling and STUN, with no hosted signaling or TURN relay.
 - `host` / `connect` — the streamlined peer workflow: room setup, browser
-  login, and connection-local credential handoff.
-- `project` — configure Codex or Claude from a project directory, granting the
-  bridge access to that directory only.
+  login, connection-local credential handoff, and attachment of the current
+  project directory.
+- `project` — switch the attached project while a connection is running.
 
 The **server and web UI** are not in this package — run them from the
 [clausroom repository](https://github.com/chengine/clausroom).
 
 ## Direct peer transport
 
-For the normal two-command-per-person flow, globally install this package and
-use:
+For the normal one-command-per-person flow, globally install this package and
+run each command from the repository that participant's agent may access:
 
 ```bash
-# Room owner, from any directory:
+# Room owner:
+cd /path/to/host-repository
 clausroom host
-# Or operate an existing remote checkout and browse through an SSH local forward:
-clausroom host --ssh admin@171.64.160.63
 
-# Other participant, from any directory:
+# Other participant, on their own machine:
+cd /path/to/guest-repository
 clausroom connect
-
-# Each participant, in a second terminal:
-cd /path/to/project
-clausroom project                 # Codex
-# clausroom project --agent claude
 ```
 
-With `host --ssh`, run `project` in a second SSH session on the machine that
-actually holds the project. The host command maintains matching mode-0600
-connection state on both the browser laptop and SSH target.
+Both commands configure Codex by default. Use `--agent claude` for Claude Code,
+`--allow-agent-uploads` to enable approval-gated uploads, or `--no-project` for
+chat without a coding project. Run `clausroom project` from another repository
+only to switch the attachment while the connection is running.
 
-`host` and `connect` stay running. `project` stores no raw token in the MCP
-configuration and sets its sole filesystem root to the current directory.
+`host` and `connect` stay running. Their generated MCP configuration stores no
+raw token and sets its sole filesystem root to the command's current directory.
 The room credential is in a mode-0600 active connection file only for the
 connection lifetime. The combined offer includes room credentials, so exchange
-it privately.
+the complete `CLAUSROOM_PEER_OFFER ...` line privately.
+
+For the optional laptop wrapper:
+
+```bash
+clausroom host --ssh admin@171.64.160.63
+```
+
+Run `clausroom project` in a second SSH session on the machine that actually
+holds the project. The wrapper cannot infer a remote project from the laptop's
+current directory.
 
 The lower-level transport commands remain useful for diagnostics:
 
