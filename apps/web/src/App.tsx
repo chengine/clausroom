@@ -29,16 +29,13 @@ export function App() {
     setView({ name: 'login' });
   }, []);
 
-  // Every 401 from any view lands here; an expired session (the sliding TTL)
-  // clears the stored token and explains itself on the login screen.
-  const handleUnauthorized = useCallback((err?: unknown) => {
+  // Every 401 from any view lands here: forget the token and go back to login.
+  const handleUnauthorized = useCallback(() => {
     setSessionToken(null);
     setToken(null);
     setMe(null);
     setBootError(null);
-    setLoginNotice(
-      api.isSessionExpired(err) ? 'Your session expired — paste a fresh token.' : null,
-    );
+    setLoginNotice(null);
     setView({ name: 'login' });
   }, []);
 
@@ -56,7 +53,7 @@ export function App() {
       })
       .catch((err) => {
         if (cancelled) return;
-        if (api.isUnauthorized(err)) handleUnauthorized(err);
+        if (api.isUnauthorized(err)) handleUnauthorized();
         else setBootError(api.errorText(err));
       });
     return () => {

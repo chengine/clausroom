@@ -1,7 +1,7 @@
 import { useState } from 'react';
-import { DEFAULTS, type Approval } from '@clausroom/protocol';
+import { LIMITS, type Approval } from '@clausroom/protocol';
 import { errorText } from '../api.js';
-import { humanSize, shortSha, timeAgo, typeLabel } from '../format.js';
+import { humanSize, timeAgo, typeLabel } from '../format.js';
 import { CheckIcon, ShieldIcon, XIcon } from './icons.js';
 
 interface ApprovalCardProps {
@@ -16,7 +16,7 @@ interface ApprovalCardProps {
 export function effectiveStatus(approval: Approval): Approval['status'] {
   if (
     approval.status === 'pending' &&
-    Date.now() - new Date(approval.created_at).getTime() > DEFAULTS.APPROVAL_TTL_MS
+    Date.now() - new Date(approval.created_at).getTime() > LIMITS.APPROVAL_TTL_MS
   ) {
     return 'expired';
   }
@@ -48,7 +48,6 @@ export function ApprovalCard({ approval, meId, nameOf, onRespond, compact }: App
   const description =
     payloadString(approval.payload, 'description') ?? payloadString(approval.payload, 'reason');
   const sizeBytes = payloadNumber(approval.payload, 'size_bytes');
-  const sha = payloadString(approval.payload, 'sha256');
 
   async function respond(decision: 'approved' | 'denied') {
     if (busy) return;
@@ -115,14 +114,6 @@ export function ApprovalCard({ approval, meId, nameOf, onRespond, compact }: App
           <div className="approval-card__row">
             <dt>size</dt>
             <dd>{humanSize(sizeBytes)}</dd>
-          </div>
-        )}
-        {sha && (
-          <div className="approval-card__row">
-            <dt>sha256</dt>
-            <dd className="mono" title={sha}>
-              {shortSha(sha)}
-            </dd>
           </div>
         )}
         {description && (

@@ -69,7 +69,7 @@ export function normalizeBase(base: string): string {
   return trimmed;
 }
 
-/** The absolute HTTP origin requests go to (used for display + snippets). */
+/** The absolute HTTP origin requests go to. */
 export function effectiveOrigin(): string {
   return getServerBase() || window.location.origin;
 }

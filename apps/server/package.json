@@ -3,9 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "clausroom server: Express REST + ws WebSocket + better-sqlite3 storage.",
+  "description": "clausroom room server: express REST + ws + sqlite, loopback only.",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
+    "dev": "tsx src/index.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js"
   },

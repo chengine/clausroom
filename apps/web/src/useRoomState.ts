@@ -13,15 +13,14 @@ import type {
   Participant,
   Role,
   Room,
-  WsServerFrame,
+  ServerFrame,
 } from '@clausroom/protocol';
 import * as api from './api.js';
 import { RoomSocket, type ConnectionState } from './ws.js';
 
 /**
- * Body of the human message posted by the Continue button and the /continue
- * composer command (docs/API-CONTRACT.md §4 "Turn-continue"): any human
- * message breaks the consecutive-agent run, this is just the canonical one.
+ * What the Continue button posts. Any human message breaks the consecutive-agent
+ * run; this is just the canonical way to say "carry on".
  */
 export const CONTINUE_MESSAGE_BODY = 'Continue — granted more agent turns.';
 
@@ -30,9 +29,8 @@ export interface RoomState {
   loadError: string | null;
   room: Room | null;
   myRole: Role | null;
-  publicBaseUrl: string | null;
-  /** Effective server turn limit (AGENT_ROOM_MAX_AUTO_TURNS); null until loaded. */
-  maxAutoTurns: number | null;
+  /** The room's turn limit; null until the first load lands. */
+  agentTurns: number | null;
   participants: Participant[];
   onlineUserIds: string[];
   /** Users (agents, in practice) currently reporting 'working' activity. */
@@ -48,8 +46,7 @@ const initialState: RoomState = {
   loadError: null,
   room: null,
   myRole: null,
-  publicBaseUrl: null,
-  maxAutoTurns: null,
+  agentTurns: null,
   participants: [],
   onlineUserIds: [],
   workingUserIds: [],
@@ -70,8 +67,7 @@ type Action =
       room: Room;
       participants: Participant[];
       myRole: Role;
-      publicBaseUrl: string | null;
-      maxAutoTurns: number | null;
+      agentTurns: number;
     }
   | { type: 'load_error'; error: string }
   | { type: 'room'; room: Room }
@@ -97,8 +93,7 @@ function reducer(state: RoomState, action: Action): RoomState {
         room: action.room,
         participants: action.participants,
         myRole: action.myRole,
-        publicBaseUrl: action.publicBaseUrl,
-        maxAutoTurns: action.maxAutoTurns,
+        agentTurns: action.agentTurns,
       };
     case 'load_error':
       return { ...state, loading: false, loadError: action.error };
@@ -182,8 +177,8 @@ export interface RoomActions {
   setAllAgentsPaused: (paused: boolean) => Promise<void>;
   setParticipantPaused: (userId: string, paused: boolean) => Promise<void>;
   respondApproval: (approvalId: string, decision: 'approved' | 'denied') => Promise<void>;
-  addParticipant: (body: AddParticipantRequest) => Promise<api.AddParticipantResult>;
-  rotateToken: (userId: string) => Promise<api.RotateTokenResult>;
+  addParticipant: (body: AddParticipantRequest) => Promise<api.TokenResult & { participant: Participant }>;
+  rotateToken: (userId: string) => Promise<api.TokenResult>;
   exportTranscript: () => Promise<void>;
   downloadArtifact: (artifact: Artifact) => Promise<void>;
 }
@@ -261,12 +256,12 @@ export function useRoomState(
   );
 
   const handleFrame = useCallback(
-    (frame: WsServerFrame) => {
+    (frame: ServerFrame) => {
       switch (frame.type) {
         case 'hello':
           dispatch({ type: 'room', room: frame.room });
           dispatch({ type: 'participants', participants: frame.participants });
-          dispatch({ type: 'presence', onlineUserIds: frame.presence });
+          dispatch({ type: 'presence', onlineUserIds: frame.online_user_ids });
           // The hello frame carries no activity info: a fresh connection
           // assumes everyone is idle and learns from subsequent frames.
           dispatch({ type: 'activity_reset' });
@@ -295,18 +290,12 @@ export function useRoomState(
           dispatch({ type: 'presence', onlineUserIds: frame.online_user_ids });
           break;
         case 'activity':
-          // No local revert timer here on purpose: the server broadcasts a
-          // 'working' frame only on the idle→working EDGE (repeated reports
-          // just refresh its 60 s auto-revert, contract §8), so during one
-          // long engine run no further frame ever arrives — a client-side
-          // fallback would wrongly flip a still-working agent back to idle.
-          // Lost-frame cases are covered by the server's auto-revert broadcast
-          // and by the hello reset on reconnect.
-          dispatch({
-            type: 'activity',
-            userId: frame.payload.user_id,
-            state: frame.payload.state,
-          });
+          // Deliberately no local revert timer: the server sends 'working' only
+          // on the idle→working edge, so during one long run no further frame
+          // arrives and a client-side timeout would wrongly show it as idle.
+          // Lost frames are covered by the server's own revert and by the
+          // activity_reset on reconnect above.
+          dispatch({ type: 'activity', userId: frame.user_id, state: frame.state });
           break;
         case 'pong':
         case 'error':
@@ -342,8 +331,7 @@ export function useRoomState(
           room: detail.room,
           participants: detail.participants,
           myRole: detail.my_role,
-          publicBaseUrl: detail.public_base_url ?? null,
-          maxAutoTurns: detail.max_auto_turns ?? null,
+          agentTurns: detail.agent_turns,
         });
         const [approvals, artifacts] = await Promise.all([
           api.getApprovals(token, roomId),
@@ -430,7 +418,7 @@ export function useRoomState(
   );
 
   const rotateToken = useCallback(
-    (userId: string) => guard(api.rotateParticipantToken(token, roomId, userId)),
+    (userId: string) => guard(api.rotateToken(token, roomId, userId)),
     [guard, token, roomId],
   );
 

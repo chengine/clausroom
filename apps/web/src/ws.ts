@@ -1,18 +1,18 @@
 /**
  * WebSocket client for /ws with exponential-backoff reconnect.
  *
- * Frames are validated with WsServerFrameSchema before they reach the app.
+ * Frames are validated with ServerFrameSchema before they reach the app.
  * Auth-style close codes (4001/4003/4004) stop reconnecting — a bad token
  * will not fix itself. On every (re)connect the server sends a `hello`
  * frame; the room state layer uses it to catch up missed messages via REST.
  */
-import { WsServerFrameSchema, type WsServerFrame } from '@clausroom/protocol';
+import { ServerFrameSchema, type ServerFrame } from '@clausroom/protocol';
 import { getServerBase } from './storage.js';
 
 export type ConnectionState = 'connecting' | 'online' | 'reconnecting' | 'denied' | 'stopped';
 
 export interface RoomSocketHandlers {
-  onFrame: (frame: WsServerFrame) => void;
+  onFrame: (frame: ServerFrame) => void;
   onState: (state: ConnectionState) => void;
 }
 
@@ -99,7 +99,7 @@ export class RoomSocket {
       } catch {
         return;
       }
-      const parsed = WsServerFrameSchema.safeParse(raw);
+      const parsed = ServerFrameSchema.safeParse(raw);
       if (parsed.success) this.handlers.onFrame(parsed.data);
     };
 

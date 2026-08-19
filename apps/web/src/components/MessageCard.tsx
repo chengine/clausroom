@@ -1,6 +1,6 @@
 import { useState, type CSSProperties } from 'react';
 import type { Artifact, Message } from '@clausroom/protocol';
-import { fmtTime, humanSize, initials, isArtifactDead, preview, shortSha, typeLabel } from '../format.js';
+import { fmtTime, humanSize, initials, preview, typeLabel } from '../format.js';
 import { BotIcon, CheckIcon, DownloadIcon, FileIcon, PersonIcon, ReplyIcon, SparkIcon } from './icons.js';
 import { Markdown } from './Markdown.js';
 
@@ -159,21 +159,18 @@ export function MessageCard({
                   </span>
                 );
               }
-              const dead = isArtifactDead(artifact);
               return (
                 <button
                   key={id}
                   type="button"
-                  className={`artifact-chip${dead ? ' artifact-chip--dead' : ''}`}
+                  className="artifact-chip"
                   onClick={() => onDownloadArtifact(artifact)}
-                  title={dead ? 'expired or deleted' : `sha256 ${artifact.sha256}`}
+                  title={`download ${artifact.filename}`}
                 >
                   <FileIcon size={14} />
                   <span className="artifact-chip__name">{artifact.filename}</span>
-                  <span className="artifact-chip__meta">
-                    {humanSize(artifact.size_bytes)} · {dead ? 'expired' : shortSha(artifact.sha256)}
-                  </span>
-                  {!dead && <DownloadIcon size={13} className="artifact-chip__dl" />}
+                  <span className="artifact-chip__meta">{humanSize(artifact.size_bytes)}</span>
+                  <DownloadIcon size={13} className="artifact-chip__dl" />
                 </button>
               );
             })}

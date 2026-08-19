@@ -1,16 +1,4 @@
 /** Small formatting helpers shared across the UI. */
-import type { Artifact } from '@clausroom/protocol';
-
-/**
- * Dead = the retention sweep deleted the file, or it is past its expiry
- * (either way the download route 404s with "Artifact expired or deleted.").
- */
-export function isArtifactDead(artifact: Artifact): boolean {
-  if (artifact.deleted_at) return true;
-  if (!artifact.expires_at) return false;
-  const expires = Date.parse(artifact.expires_at);
-  return Number.isFinite(expires) && expires <= Date.now();
-}
 
 export function humanSize(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return '?';
@@ -24,10 +12,6 @@ export function humanSize(bytes: number): string {
     unit = next;
   }
   return `${value >= 10 ? Math.round(value) : value.toFixed(1)} ${unit}`;
-}
-
-export function shortSha(sha: string): string {
-  return sha.slice(0, 10);
 }
 
 const timeFmt = new Intl.DateTimeFormat(undefined, {
@@ -82,15 +66,6 @@ export function timeAgo(iso: string): string {
 /** "agent_answer" -> "agent answer" for badges. */
 export function typeLabel(messageType: string): string {
   return messageType.replaceAll('_', ' ');
-}
-
-/** "Teacher's Agent" -> "teachers-agent" for bridge_name suggestions. */
-export function slugify(name: string): string {
-  const slug = name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-  return slug || 'agent';
 }
 
 export function initials(name: string): string {

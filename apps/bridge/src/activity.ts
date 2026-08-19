@@ -1,57 +1,34 @@
 /**
- * Automatic agent-activity signaling (docs/API-CONTRACT.md §8, §12).
+ * The "working" pill. Reports `working` while at least one tool call is in
+ * flight and `idle` shortly after the last one finishes, so back-to-back calls
+ * do not make it flicker.
  *
- * Tracks how many MCP tool executions are in flight and reports the agent's
- * ephemeral activity state over the room WebSocket:
- *
- *   - 0 -> 1 in flight:  {"type":"status","state":"working"}
- *   - back to 0:         {"type":"status","state":"idle"} after a 500 ms
- *                        debounce, so back-to-back tool calls don't flap the
- *                        "working" pill in the web UI.
- *
- * Best-effort by design (contract §12): a failed or dropped status frame must
- * NEVER break a tool call — if the socket is down, tool execution proceeds and
- * no frame is sent. While work is in flight the tracker re-sends `working`
- * every 30 s (the server auto-reverts to idle after
- * DEFAULTS.ACTIVITY_IDLE_TIMEOUT_MS = 60 s without a refresh; a repeated
- * report refreshes the timer without rebroadcasting) and re-asserts `working`
- * after every reconnect, since the server resets a user to idle when their
- * last socket closes.
- *
- * `room_wait_for_new_messages` must NOT be tracked — it is idle waiting and
- * must not flip the state (contract §12).
+ * Entirely best-effort: a dropped frame must never fail the tool call it
+ * describes. `room_wait_for_new_messages` deliberately is not tracked — waiting
+ * is not working.
  */
-
 import type { ActivityState } from '@clausroom/protocol';
-import type { RoomSocket } from './client.js';
+import type { Feed } from './client.js';
 
-/** Debounce on the working -> idle edge. */
-export const IDLE_DEBOUNCE_MS = 500;
-/** Refresh cadence for the `working` report (half the server's 60 s revert). */
-const WORKING_REFRESH_MS = 30_000;
+const IDLE_DEBOUNCE_MS = 500;
+/** Half the server's idle timeout, so a long run keeps the pill alive. */
+const REFRESH_MS = 30_000;
 
-export class ActivityTracker {
+export class Activity {
   private inFlight = 0;
-  /** Last state we reported to the server (it assumes idle until told otherwise). */
   private reported: ActivityState = 'idle';
-  private idleTimer: NodeJS.Timeout | null = null;
-  private refreshTimer: NodeJS.Timeout | null = null;
+  private idle: NodeJS.Timeout | null = null;
+  private refresh: NodeJS.Timeout | null = null;
   private readonly unsubscribe: () => void;
 
-  constructor(private readonly socket: RoomSocket) {
-    // A reconnect resets our server-side activity to idle (last-socket-close
-    // rule); re-assert `working` if tool calls are still in flight when the
-    // new connection's hello frame arrives.
-    this.unsubscribe = socket.onFrame((frame) => {
-      if (frame.type === 'hello' && this.inFlight > 0) this.send('working');
+  constructor(private readonly feed: Feed) {
+    // A reconnect resets us to idle server-side; re-assert if work continues.
+    this.unsubscribe = feed.on((frame) => {
+      if (frame.type === 'hello' && this.inFlight > 0) this.report('working');
     });
   }
 
-  /**
-   * Wrap one tool execution with working/idle signaling. The wrapped function's
-   * result (or exception) always propagates unchanged — activity signaling can
-   * never fail a tool call.
-   */
+  /** Wrap one tool call. Its result — or its exception — passes through intact. */
   async track<T>(fn: () => Promise<T>): Promise<T> {
     this.begin();
     try {
@@ -61,55 +38,43 @@ export class ActivityTracker {
     }
   }
 
-  /** Stop all timers and the reconnect listener (shutdown). */
   stop(): void {
-    if (this.idleTimer) clearTimeout(this.idleTimer);
-    this.idleTimer = null;
-    this.clearRefresh();
+    if (this.idle) clearTimeout(this.idle);
+    if (this.refresh) clearInterval(this.refresh);
     this.unsubscribe();
   }
 
   private begin(): void {
     this.inFlight += 1;
-    if (this.idleTimer) {
-      // A new call landed inside the idle debounce window: cancel the idle
-      // report — the server never saw us go idle, so nothing to re-send.
-      clearTimeout(this.idleTimer);
-      this.idleTimer = null;
+    if (this.idle) {
+      // A new call arrived inside the debounce window; the server never saw idle.
+      clearTimeout(this.idle);
+      this.idle = null;
     }
-    if (this.reported !== 'working') this.send('working');
-    if (!this.refreshTimer) {
-      this.refreshTimer = setInterval(() => {
-        if (this.inFlight > 0) this.send('working');
-      }, WORKING_REFRESH_MS);
-      this.refreshTimer.unref();
+    if (this.reported !== 'working') this.report('working');
+    if (!this.refresh) {
+      this.refresh = setInterval(() => {
+        if (this.inFlight > 0) this.report('working');
+      }, REFRESH_MS);
+      this.refresh.unref();
     }
   }
 
   private end(): void {
     this.inFlight = Math.max(0, this.inFlight - 1);
-    if (this.inFlight > 0) return;
-    if (this.idleTimer) clearTimeout(this.idleTimer);
-    this.idleTimer = setTimeout(() => {
-      this.idleTimer = null;
-      if (this.inFlight > 0) return; // a call began exactly at the boundary
-      this.clearRefresh();
-      this.send('idle');
+    if (this.inFlight > 0 || this.idle) return;
+    this.idle = setTimeout(() => {
+      this.idle = null;
+      if (this.inFlight > 0) return;
+      if (this.refresh) clearInterval(this.refresh);
+      this.refresh = null;
+      this.report('idle');
     }, IDLE_DEBOUNCE_MS);
-    this.idleTimer.unref();
+    this.idle.unref();
   }
 
-  private clearRefresh(): void {
-    if (this.refreshTimer) clearInterval(this.refreshTimer);
-    this.refreshTimer = null;
-  }
-
-  private send(state: ActivityState): void {
-    try {
-      this.socket.send({ type: 'status', state });
-    } catch {
-      /* best-effort: a status failure must never break a tool call */
-    }
+  private report(state: ActivityState): void {
+    this.feed.send({ type: 'status', state });
     this.reported = state;
   }
 }

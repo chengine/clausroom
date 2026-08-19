@@ -1,181 +1,110 @@
-# clausroom security model
+# What clausroom protects, and what it doesn't
 
-This document restates the ten security invariants from the product spec
-(section 0) against the actual implementation, then describes the token model,
-artifact policy, and approval model, and finishes with an honest list of what is
-**not** enforced by the code.
+The point of clausroom is that two people can put their coding agents in the same
+room without either of them getting access to the other's machine. This is how
+that holds up, and where it stops.
 
-Layers referenced below:
+## The boundaries
 
-- **Network transport** — either Tailscale device sharing + Serve, or a
-  direct-only WebRTC/ICE data channel with manual offer/answer signaling.
-- **Server** (`apps/server`) — central enforcement: auth, room membership,
-  pause/turn/rate limits, upload gates, logging.
-- **Bridge** (`apps/bridge`) — local enforcement on each human's machine:
-  filesystem roots, deny globs, secret scanning, local approvals.
-- **Deploy** (`deploy/`) — configuration that keeps the above honest.
+**Neither machine is reachable.** The host's room server binds `127.0.0.1` and
+nothing else — there is no flag to change that. The guest's side of the tunnel
+also binds `127.0.0.1`, so nobody else on their network can use it. No port is
+published, no domain or certificate is involved, and there is no SSH path between
+the two.
 
-## The ten invariants, and which layer enforces each
+**The tunnel goes to exactly one place.** The host's data channels are wired to
+one validated loopback address, fixed at startup: the port its own server
+listens on. It is not a proxy. It cannot be pointed at SSH, at a file share, or
+at anything else, and it never interprets the bytes it carries as a path or a
+command.
 
-| # | Invariant | Enforced by |
-|---|-----------|-------------|
-| 1 | Do not invite the collaborator into your whole tailnet | **Tailscale mode:** use device sharing of the server machine only. **Peer mode:** no tailnet membership exists; a manually exchanged WebRTC offer carries one intended participant's room-scoped credentials and authorizes one peer session. |
-| 2 | Do not host the chatroom on your main personal laptop if avoidable | **Deploy**: `deploy/Dockerfile` + `docker-compose.yml` run the server as a non-root user in a container whose only writable mount is `./data:/data` — no home directory, no repo. The systemd unit adds `ProtectHome=read-only`. |
-| 3 | The collaborator reaches only the chatroom server, only one port | **Tailscale:** grants allow `tcp:443` only and Serve terminates TLS. **Peer:** Clausroom itself stays on `127.0.0.1`; the authenticated host tunnel accepts only the Clausroom data-channel protocol and maps it to one fixed, validated loopback target. It cannot select SSH, a network filesystem, or another address. |
-| 4 | The host machine never initiates arbitrary connections into the guest's machine | **Architecture**: normal bridges are outbound HTTP/WSS clients. In peer mode both sides explicitly participate in ICE and exchange packets only inside the authenticated WebRTC session; the guest exposes only a `127.0.0.1` proxy to its own browser/bridge. There is no general server→guest connection primitive. |
-| 5 | The server has no filesystem access to either repo | **Server design**: it reads/writes only `AGENT_ROOM_DB` and `AGENT_ROOM_ARTIFACT_DIR`. It stores messages and explicitly uploaded artifacts; there is no endpoint that reads arbitrary paths. **Deploy**: the container mounts only `/data`. |
-| 6 | Each bridge controls what its local agent can see/do; read-only by default | **Bridge**: `policy.read_only_default = true` in `bridge.toml`; `allow_agent_to_upload_files = false` by default; every tool call passes local policy checks before any network call. |
-| 7 | Code writes, shell commands, and file transfers above small limits require local human approval | **Bridge + server**: the bridge requires an approved `artifact_upload` approval for uploads over `max_upload_bytes_without_approval` (1 MiB) or when `require_human_approval_for_uploads` is set; the **server independently** re-enforces the gate for agent uploads (size > `AGENT_ROOM_REQUIRE_APPROVAL_BYTES`, secret-like filename, or archive → `403 approval_required`). Approvals are reviewed only by the requesting agent's own human (`reviewer_user_id = owner_user_id`); even the room owner cannot approve someone else's agent (`403 forbidden`). The bridge exposes no shell tool at all. |
-| 8 | Every agent-to-agent message is logged; no hidden backchannel | **Server**: all mutations happen over REST; every accepted message is stored in SQLite, broadcast to every socket in the room (`recipient_ids` is advisory addressing, not privacy), and logged to stdout as `MSG <room_id> <sender_id> <message_type>`. Transcripts export via `GET /api/rooms/:id/export.md`. The WS channel accepts only `ping` from clients. |
-| 9 | Artifacts move as files with metadata, hashes, and limits — not inline in chat | **Server**: multipart upload to `POST /api/rooms/:id/artifacts` with stored `sha256`, `size_bytes`, `mime_type`; message bodies with a 2000+ char base64-alphabet run are rejected with `422 inline_blob`; JSON bodies are capped at 1 MB; uploads at `AGENT_ROOM_MAX_UPLOAD_BYTES` (100 MiB). **Bridge**: verifies the sha256 on download and only writes into `downloads_dir`. |
-| 10 | Secrets are denied by policy | **Bridge**: `DEFAULT_DENY_GLOBS` (`.env`, `.ssh`, `*.pem`, `*token*`, …) are always applied — config `deny_globs` can only add to them — plus `SECRET_NAME_GLOBS` / `SECRET_CONTENT_PATTERNS` scans (first 1 MiB of text files). **Server**: secret-like filenames from agents force the approval gate even if a bridge is compromised. Both lists live in `@clausroom/protocol` so server and bridge cannot drift. |
+**The link is direct or it is nothing.** ICE decides connectivity and DTLS
+authenticates the fingerprints in the offer and answer you exchanged by hand.
+TURN URLs are rejected in config, and a relayed candidate pair is refused at
+runtime — so your room never passes through a third party's server. Both sides
+print the pair they chose.
 
-## Token model
+**The server never touches either repository.** It reads and writes one SQLite
+file and one directory of uploaded files. There is no endpoint that reads an
+arbitrary path, because there is no code that opens one.
 
-Three bearer-token kinds, distinguishable by prefix (`TOKEN_PREFIXES` in
-`@clausroom/protocol`):
+**Each side's agent sees one directory.** The bridge resolves every requested
+path — symlinks included — and refuses anything that does not land inside the one
+directory in your config. On top of that, an always-on deny list (`.env`, `.ssh`,
+`*.pem`, `*token*`, `*credential*`, `secrets/`, `.git`, `node_modules`) applies
+with no way to switch it off, and any file whose first 5 MB look like credentials
+is refused outright rather than gated. Your partner's agent is subject to their
+own copy of these rules on their own machine; nothing you configure reaches
+across, and nothing they configure reaches you.
 
-| Kind | Prefix | Held by | Scope |
-|---|---|---|---|
-| invite | `arit_` | invited human | single-use; exchanged for a session token at `POST /api/auth/login` |
-| session | `arst_` | human browser | all human REST/WS calls |
-| bridge | `arbt_` | local bridge process | bound to one `(user, room)` pair |
+**Files move only when a human says so.** Every agent upload needs an approved
+`artifact_upload` request, and an approval is good for exactly one upload. Only
+the human who owns that agent can answer it — not the other person, not even the
+room owner. A human uploading through their own browser needs no approval,
+because they are the approval.
 
-- **Hash-only server storage.** The server persists only `sha256(token)` in
-  `tokens.token_hash` and returns a raw token only in the minting API response
-  (or bootstrap stdout). The streamlined host immediately places the intended
-  guest's returned tokens into the private combined offer; they are not put in
-  the database or transcript. A database or transcript leak therefore does not
-  leak usable credentials.
-- **Prefixes make leaks greppable** and let the server reject a bridge token used
-  as a session token (and vice versa) before any lookup.
-- **Single-use invites.** `tokens.used_at` is set at login; reuse → `401`.
-- **Room binding.** A bridge token used against any other room → `403`.
-- **Revocation/rotation.** `POST /api/rooms/:id/participants/:userId/token`
-  (owner only) revokes all of that user's previous tokens for the room — for
-  humans including their session tokens — and mints a fresh one. A token is valid
-  iff `revoked_at IS NULL` (and, for invites, `used_at IS NULL`); revocation takes
-  effect on the next request.
-- Bridge tokens are never written to `bridge.toml` or coding-agent MCP
-  configuration. In the hand-configured flow, the token comes from an
-  environment variable (`token_env`, default `AGENT_ROOM_BRIDGE_TOKEN`). In the
-  streamlined `host`/`connect` flow, it lives in
-  `~/.clausroom/active-room.json` with mode 0600 while the owning process is
-  alive and is injected only into the MCP subprocess; normal shutdown removes
-  the file and stale-PID checks reject a record left by a crash.
-- **Owner-lockout recovery.** Session TTL expiry could otherwise brick a
-  deployment: minting a fresh invite requires an authenticated owner session —
-  exactly what an idle owner just lost. On startup, if an **admin human** (the
-  bootstrap Host) holds no usable credential at all (every invite used or
-  revoked, every session revoked or TTL-expired), the server mints a fresh
-  single-use invite for them and prints it once to stdout as
-  `CLAUSROOM_RECOVERY_INVITE arit_…`. Recovery therefore requires restarting
-  the server process (i.e. shell access to the host machine) — a remote guest
-  cannot trigger it. Non-admin humans still need the room owner to rotate
-  their token.
+**There is no back channel.** Every mutation is a REST call. Every accepted
+message is stored, broadcast to every socket in the room, and logged to stdout as
+`MSG <room> <sender> <type>`. `recipient_ids` is addressing, not privacy. The
+WebSocket accepts only `ping` and an agent's own `working`/`idle` report.
+`GET /api/rooms/:id/export.md` gives you the whole transcript.
 
-## Artifact policy
+**Agents cannot run away.** Three agent messages in a row and the room refuses
+the fourth until a human speaks. Either human can pause every agent, or one
+agent, at any moment. An agent that is refused is told to stop and wait, not to
+retry.
 
-- Absolute cap `AGENT_ROOM_MAX_UPLOAD_BYTES` (100 MiB) for **everyone**; the
-  stream is aborted at the limit (`413 too_large`).
-- Agent uploads require an approved, unexpired, same-room, same-requester
-  `artifact_upload` approval when the file is > `AGENT_ROOM_REQUIRE_APPROVAL_BYTES`
-  (1 MiB), has a secret-like filename, or is an archive (`.zip .tar .gz .tgz .7z
-  .rar .bz2 .xz` or archive mime types). The approval is **bound to the exact
-  file** (its `payload.sha256` must match the uploaded content, and
-  `payload.size_bytes` when present must match the size) and is **single-use**
-  (consumed by the upload) — a human "yes" to one file can never authorize a
-  different or repeated upload.
-- Filenames are sanitized (basename only, `[A-Za-z0-9._\- ()]`, ≤128 chars) and
-  content is stored under
-  `<AGENT_ROOM_ARTIFACT_DIR>/<room_id>/<artifact_id>/<sha256>__<name>` — the
-  sha256 in the path and DB lets both sides verify integrity end to end.
-- Every upload auto-creates an `artifact_uploaded` message, so files can never
-  move silently.
-- Download is participant-only; non-participants get `404` (room existence is
-  never leaked).
+**Credentials are not stored.** The database holds `sha256(token)` and never the
+token, so a copy of the SQLite file is not a set of working credentials. A raw
+token appears exactly twice: in the response that mints it, and in the offer the
+host hands to the guest. Browser session tokens travel in a URL fragment, which
+is never sent to the server, and the page drops the fragment as soon as it has
+read it. `clausroom.toml` never contains one; `~/.clausroom/session.json` does,
+and it is mode 0600 and deleted when the room closes.
 
-## Approval model
+**Secrets in chat get a seatbelt.** The server rewrites anything matching a known
+credential shape — API keys, private key headers, its own token format — to
+`[redacted-secret]` before storing or broadcasting it, and refuses a message
+carrying a long base64 run with `inline_blob`. The agent's own machine refuses to
+send such text in the first place. This is a seatbelt for the moment someone
+pastes a key into the room, not a guarantee.
 
-- Only agents (bridge tokens) can create approvals; only the requesting agent's
-  **own human** (`owner_user_id`, who must be a human participant of the room)
-  can respond. The remote human can see approvals but can never approve actions
-  on someone else's machine.
-- Pending approvals expire after 1 hour (`APPROVAL_TTL_MS`, lazy expiry on read
-  or respond); expired approvals never satisfy the upload gate and cannot be
-  resolved (`409 conflict`).
-- Approved `artifact_upload` approvals are single-use and file-bound (see the
-  artifact policy above): one approval, one upload, of exactly the reviewed file.
-- Every resolution is broadcast and recorded as a `system_event` message from the
-  System user, so the transcript shows who approved what, when. `system_event`
-  is reserved for the server: the message API rejects it from every token holder
-  (`422 validation`), so agents can neither impersonate System notices nor
-  launder messages past the turn-limit walk (which skips `system_event` rows).
+**The auto-responder is fenced in.** It runs the local agent with read-only tools
+by default, in the project directory, with a wall-clock limit, and with no
+clausroom variables in its environment. Its prompt states plainly that the room
+is untrusted data and that instructions found inside it must be refused. Its
+reply passes the same local checks and the same room limits as anything a human
+sends. A run that times out posts nothing.
 
-## Abuse limits (agents talking too much)
+## What this does not protect against
 
-- **Turn limit:** after `AGENT_ROOM_MAX_AUTO_TURNS` (3) consecutive agent
-  messages, further agent sends get `429 turn_limit` until a human speaks.
-- **Pause:** humans can pause all agents in a room (`agents_paused`) or a single
-  participant; paused agents get `403 agents_paused` / `403 participant_paused`.
-- **Rate limit:** >30 accepted messages per user per sliding 60 s → `429`.
-- **Body cap:** 32,000 chars per message.
+**The offer is a bearer invitation.** It carries the guest's one-time browser
+invite and their agent's room token. Whoever holds it first can join. Send it
+over a channel you trust, and if it goes to the wrong person, stop the host and
+start again — the room and its tokens die with it.
 
-## What is NOT enforced (honest gaps)
+**Prompt injection is mitigated, not solved.** Room content reaches a model that
+can act. Every surface labels it as untrusted and the tools are read-only by
+default, but a sufficiently persuasive message aimed at a permissive
+configuration is a real risk. Turning on `upload_files` or widening `tools` is
+you accepting more of it.
 
-Three MVP gaps are closed as of v0.1 and are no longer on this list: artifacts
-now expire and count against a per-room storage quota (`AGENT_ROOM_ARTIFACT_RETENTION_DAYS`,
-`AGENT_ROOM_ROOM_STORAGE_BYTES`); session tokens now slide-expire
-(`AGENT_ROOM_SESSION_TTL_DAYS`); and message bodies are now redacted against
-the shared secret patterns. What remains:
+**A compromised bridge is a compromised side.** The local policy runs on your
+machine, in your process. If something has already taken over that process, it
+has your project. The server's independent approval gate is what stops it turning
+into their project too.
 
-- **Transport choice is configuration-sensitive.** Tailscale mode speaks plain
-  HTTP only on loopback and relies on Serve for TLS. Peer mode also keeps HTTP
-  on loopback; DTLS encrypts and authenticates the WebRTC hop. Do not override
-  the loopback bind and publish plain HTTP yourself.
-- **Network posture is partly operator-enforced.** Code cannot verify that
-  Tailscale users chose device sharing rather than a broad tailnet invite, or
-  that an institution permits direct peer traffic. Peer mode enforces its
-  loopback/fixed-target/relay-free boundaries in code, but administrators can
-  still observe and regulate STUN and ICE metadata. See `docs/PEER-CONNECT.md`.
-- **Direct ICE is not universal.** Symmetric NAT, VPN routing, or UDP policy can
-  prevent a path. TURN would improve connectivity by relaying traffic, but peer
-  mode rejects TURN and fails closed to preserve the no-data-intermediary model.
-- **Manual signaling is a capability exchange.** Offer/answer codes include
-  ephemeral candidates and fingerprints. A streamlined offer additionally
-  contains the guest's single-use browser invite and room-bound bridge token.
-  A person who receives it can attempt to join as that participant; use a
-  trusted private channel and create a new room/credentials if it is
-  misdirected.
-- **Message redaction is best-effort pattern matching.** Message bodies and
-  the pinned room summary are scanned against `SECRET_CONTENT_PATTERNS` plus
-  the clausroom token pattern (`arit_/arst_/arbt_` + 32 hex) and matches
-  become `[redacted-secret]`, but encoded, split, or novel secret formats pass
-  through untouched. It is a seatbelt against accidental paste, not a security
-  guarantee — still do not paste secrets into chat. `choices` entries are not
-  scanned.
-- **Secret scanning of uploads is likewise best-effort** (name globs + content
-  regexes on the first 1 MiB of text files). Novel secret formats, binary
-  encodings, or encrypted blobs will not be caught. Human review of uploads is
-  the real gate.
-- **Approval `payload` binding covers content, not intent.** The server verifies
-  the uploaded bytes match the approval payload's `sha256`/`size_bytes` and
-  consumes the approval after one upload, but the `path`/`description` fields
-  remain advisory — the reviewing human should still read them.
-- **Activity pills are cosmetic.** `working`/`idle` frames are self-reported by
-  each bridge, never persisted, and enforce nothing — an agent that lies about
-  being idle loses nothing and gains nothing. Do not treat them as an audit
-  signal; the message log is the audit signal.
-- **The auto-responder trusts its local engine.** `clausroom-bridge auto`
-  spawns whatever engine CLI the *local* config names and posts its output; the
-  server cannot tell an autonomous reply from a human-supervised one. Its real
-  constraints are the read-only tool allowlist (default `Read`/`Grep`/`Glob` —
-  widening it is the operator's explicit choice), the bridge's local policy on
-  every outgoing message, and the server's guardrails (pause flags, rate limit,
-  and the consecutive-agent turn limit), which bind it exactly like any other
-  agent. Room content fed into the engine is untrusted input; see
-  `THREAT_MODEL.md` for the prompt-injection analysis.
-- **Humans are trusted within their permissions.** A human participant can post
-  anything their `can_send`/`can_upload` flags allow, including through the
-  browser bypassing all bridge policy — the bridge constrains *agents*, not
-  people.
+**Your agent's usage is billed to you.** Each side runs and pays for its own.
+
+**Secret scanning is pattern matching.** It catches the common shapes. It will
+miss a credential that does not look like one.
+
+**The network is not invisible.** WebRTC is ordinary encrypted traffic. A network
+administrator can see STUN requests, endpoints, volume, and timing, and local
+policy may still require authorisation. Do not use this to get around an
+organisation's rules.
+
+## Reporting something
+
+Open an issue for anything ordinary. For something security-sensitive, contact
+the maintainers privately first: <https://github.com/chengine/clausroom>.

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Private two-machine agent chatroom with Tailscale or direct WebRTC peer connections.",
+  "description": "A private chatroom for two people and their coding agents, over a direct encrypted connection.",
   "workspaces": [
     "packages/*",
     "apps/*"
@@ -12,17 +12,10 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "npm run build -w @clausroom/protocol && npm run build -w @clausroom/server && npm run build -w clausroom-bridge && npm run build -w @clausroom/web",
-    "dev:server": "npm run dev -w @clausroom/server",
-    "dev:web": "npm run dev -w @clausroom/web",
+    "build": "npm run build -w @clausroom/protocol && npm run build -w @clausroom/server && npm run build -w @clausroom/web && npm run build -w clausroom-bridge",
     "install:cli": "npm install && npm run build && npm install -g ./apps/bridge",
-    "start": "npm run start -w @clausroom/server",
-    "up": "node scripts/host-setup.mjs up",
-    "host": "node scripts/host-setup.mjs",
-    "smoke": "node scripts/smoke-test.mjs",
-    "smoke:peer": "npm run build -w clausroom-bridge && node scripts/peer-smoke-test.mjs",
-    "smoke:peer-up": "npm run build && node scripts/peer-up-smoke-test.mjs",
-    "smoke:convenience": "npm run build && node scripts/convenience-smoke-test.mjs"
+    "smoke": "node scripts/smoke.mjs",
+    "dev:web": "npm run dev -w @clausroom/web"
   },
   "devDependencies": {
     "typescript": "^5.5.4"

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { DEFAULTS, type Room } from '@clausroom/protocol';
+import { LIMITS, type Room } from '@clausroom/protocol';
 import { errorText } from '../api.js';
 import { fmtTime } from '../format.js';
 import { ChevronDownIcon, PencilIcon } from './icons.js';
@@ -98,7 +98,7 @@ export function RoomSummary({ room, canEdit, nameOf, onSave }: RoomSummaryProps)
           <textarea
             className="input summary-edit__textarea"
             value={draft}
-            maxLength={DEFAULTS.SUMMARY_MAX_CHARS}
+            maxLength={LIMITS.SUMMARY_CHARS}
             placeholder="Markdown summary of where things stand… (empty clears it)"
             onChange={(e) => setDraft(e.target.value)}
             autoFocus
@@ -106,10 +106,10 @@ export function RoomSummary({ room, canEdit, nameOf, onSave }: RoomSummaryProps)
           <div className="summary-edit__foot">
             <span
               className={`summary-edit__count${
-                draft.length >= DEFAULTS.SUMMARY_MAX_CHARS ? ' summary-edit__count--max' : ''
+                draft.length >= LIMITS.SUMMARY_CHARS ? ' summary-edit__count--max' : ''
               }`}
             >
-              {draft.length.toLocaleString()} / {DEFAULTS.SUMMARY_MAX_CHARS.toLocaleString()}
+              {draft.length.toLocaleString()} / {LIMITS.SUMMARY_CHARS.toLocaleString()}
             </span>
             <div className="summary-edit__actions">
               <button

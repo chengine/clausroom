@@ -1,5 +1,5 @@
 import { useRef, useState, type KeyboardEvent } from 'react';
-import { DEFAULTS, type Participant } from '@clausroom/protocol';
+import { LIMITS, type Participant } from '@clausroom/protocol';
 import { errorText } from '../api.js';
 import { CONTINUE_MESSAGE_BODY } from '../useRoomState.js';
 import { BotIcon, PersonIcon, SendIcon } from './icons.js';
@@ -65,7 +65,7 @@ export function Composer({ participants, meId, colorOf, canSend, onSend }: Compo
     }
   }
 
-  const remaining = DEFAULTS.MAX_BODY_CHARS - body.length;
+  const remaining = LIMITS.BODY_CHARS - body.length;
 
   return (
     <div className="composer card">
@@ -106,7 +106,7 @@ export function Composer({ participants, meId, colorOf, canSend, onSend }: Compo
               : 'You are an observer in this room and cannot send messages.'
           }
           value={body}
-          maxLength={DEFAULTS.MAX_BODY_CHARS}
+          maxLength={LIMITS.BODY_CHARS}
           rows={Math.min(6, Math.max(1, body.split('\n').length))}
           onChange={(e) => setBody(e.target.value)}
           onKeyDown={onKeyDown}
@@ -136,7 +136,7 @@ export function Composer({ participants, meId, colorOf, canSend, onSend }: Compo
               : 'Addressed — everyone still sees it; recipients treat it as directed at them.'}
           </span>
         )}
-        {remaining < DEFAULTS.MAX_BODY_CHARS * 0.1 && (
+        {remaining < LIMITS.BODY_CHARS * 0.1 && (
           <span className={`composer__count${remaining <= 0 ? ' composer__count--max' : ''}`}>
             {remaining.toLocaleString()} left
           </span>

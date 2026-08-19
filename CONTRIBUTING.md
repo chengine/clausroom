@@ -1,69 +1,46 @@
 # Contributing to clausroom
 
-Thanks for pitching in. clausroom is small on purpose — a two-machine agent
-chatroom with a hard security posture — so contributions should keep it small,
-honest, and smoke-tested.
+clausroom is small on purpose. The best contribution keeps it that way.
 
-## Dev setup
+## Setup
 
-Requirements: Node.js >= 20 (CI runs 22 on Linux/macOS/Windows) and npm.
+Node.js 20 or newer.
 
 ```bash
-git clone git@github.com:chengine/clausroom.git
-cd clausroom
-npm install        # installs all workspaces (packages/* and apps/*)
-npm run build      # protocol -> server -> bridge -> web
-npm run smoke      # the gate: end-to-end smoke test against a real server
+npm install
+npm run build     # protocol -> server -> web -> bridge
+npm run smoke     # the gate
 ```
 
-Useful during development:
-
-```bash
-npm run dev:server   # tsx watch on apps/server
-npm run dev:web      # Vite dev server for apps/web
-npm start            # run the built server (apps/server/dist)
-```
-
-Workspace layout:
-
-| Path | Package | What it is |
-|---|---|---|
-| `packages/protocol` | `@clausroom/protocol` | Shared zod schemas, ids, constants — the wire contract in code. |
-| `apps/server` | `@clausroom/server` | Express REST + ws WebSocket + better-sqlite3. |
-| `apps/web` | `@clausroom/web` | Vite + React UI, served by the server at `/`. |
-| `apps/bridge` | `clausroom-bridge` | Local stdio MCP bridge (outbound-only); npm bin `clausroom-bridge`. |
+| Path | What it is |
+|---|---|
+| `packages/protocol` | Ids, limits, and schemas — everything both sides agree on. |
+| `apps/server` | The room: Express + `ws` + SQLite, loopback only. |
+| `apps/web` | The browser UI, served at `/`. |
+| `apps/bridge` | The `clausroom` command: launcher, agent tools, tunnel. |
 
 ## The rules
 
-1. **`docs/API-CONTRACT.md` is binding.** Where code and contract disagree, the
-   contract wins. Wire-visible changes (routes, schemas, error codes, stdout
-   lines, env vars) must update the contract in the same PR.
-2. **`npm run smoke` is the merge gate.** It boots a real server, drives the
-   full flow (bootstrap, login, rooms, messages, artifacts, approvals, limits),
-   and must pass on your machine before you open a PR. CI runs it on Ubuntu,
-   macOS, and Windows.
-3. **Validate external input with zod** schemas from `@clausroom/protocol` —
-   never hand-rolled checks, never redeclared schemas.
-4. **Don't weaken the security posture.** Loopback bind by default, hash-only
-   token storage, approval gates, deny globs, and the stdout audit lines are
-   features, not friction. Changes here need a matching update to
-   `docs/SECURITY.md` / `docs/THREAT_MODEL.md`.
-5. **New dependencies are a conversation, not a default.** Prefer the stdlib
-   and what's already in the tree.
+1. **`npm run smoke` must pass.** It starts a real room, drives the HTTP and
+   WebSocket surface, runs the agent tools over stdio MCP, joins through the real
+   tunnel, and watches the auto-responder answer. Nothing is mocked. If you add
+   behaviour anyone outside the process can observe, add a step for it.
+2. **Validate outside input with a schema from `@clausroom/protocol`.** Never a
+   hand-rolled check, never a second copy of a schema.
+3. **One way to do each thing.** If you find yourself writing a second path to
+   the same outcome, delete the first one instead.
+4. **`clausroom.toml` stays unambiguous.** Every value is used exactly as
+   written. No setting may change the meaning of another, and no credential ever
+   goes in it.
+5. **Don't quietly widen the boundaries.** Loopback binding, hash-only token
+   storage, the always-on deny list, the approval gate, and the `MSG` audit lines
+   are the product. Changing any of them means changing `docs/SECURITY.md` in the
+   same commit.
+6. **A new dependency is a conversation.** Prefer the standard library and what
+   is already here.
 
 ## Pull requests
 
-- Keep PRs focused: one behavior change (plus its contract/docs updates) per PR.
-- Say **what** changed, **why**, and how you verified it (`npm run smoke`
-  output, manual steps, new smoke coverage).
-- Match the existing structure and idioms of the file you're touching — this is
-  a brownfield codebase; consistency beats cleverness.
-- Extend the smoke test (`scripts/smoke-test.mjs`) when you add
-  externally-observable behavior; don't break the existing steps.
-- No secrets in code, fixtures, examples, or test output — the redaction
-  patterns exist because pastes happen; don't rely on them.
-
-## Reporting bugs and asking questions
-
-Use the issue templates (`.github/ISSUE_TEMPLATE/`). For anything
-security-sensitive, see `docs/SECURITY.md` before filing a public issue.
+One behaviour change per PR, with its docs. Say what changed, why, and how you
+checked it. Match the surrounding code — comments included: explain why a line
+exists, not what it does.

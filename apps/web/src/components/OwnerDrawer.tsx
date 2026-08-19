@@ -1,47 +1,33 @@
 import { useState, type FormEvent } from 'react';
 import type { AddParticipantRequest, Participant } from '@clausroom/protocol';
-import type { AddParticipantResult, RotateTokenResult } from '../api.js';
+import type { TokenResult } from '../api.js';
 import { errorText } from '../api.js';
-import {
-  agentOnboardingText,
-  bridgeToml,
-  claudeMcpAddCommand,
-  exportTokenLine,
-  humanOnboardingText,
-} from '../snippets.js';
 import { CopyButton } from './CopyButton.js';
 import { BotIcon, KeyIcon, PersonIcon, RefreshIcon, XIcon } from './icons.js';
 
 interface OwnerDrawerProps {
   open: boolean;
   onClose: () => void;
-  roomId: string;
-  roomName: string;
-  serverUrl: string;
   participants: Participant[];
   meId: string;
-  nameOf: (userId: string) => string;
-  onAddParticipant: (body: AddParticipantRequest) => Promise<AddParticipantResult>;
-  onRotateToken: (userId: string) => Promise<RotateTokenResult>;
+  onAddParticipant: (
+    body: AddParticipantRequest,
+  ) => Promise<TokenResult & { participant: Participant }>;
+  onRotateToken: (userId: string) => Promise<TokenResult>;
 }
 
 interface MintedToken {
   title: string;
   token: string;
-  tokenKind: 'invite' | 'bridge';
-  participantName: string;
-  ownerHumanName: string;
+  kind: 'invite' | 'bridge';
+  who: string;
 }
 
 export function OwnerDrawer({
   open,
   onClose,
-  roomId,
-  roomName,
-  serverUrl,
   participants,
   meId,
-  nameOf,
   onAddParticipant,
   onRotateToken,
 }: OwnerDrawerProps) {
@@ -80,10 +66,8 @@ export function OwnerDrawer({
         setMinted({
           title: `${name} added`,
           token,
-          tokenKind: result.bridge_token ? 'bridge' : 'invite',
-          participantName: name,
-          ownerHumanName:
-            kind === 'agent' ? nameOf(ownerUserId || meId) : name,
+          kind: result.bridge_token ? 'bridge' : 'invite',
+          who: name,
         });
       }
       setDisplayName('');
@@ -112,9 +96,8 @@ export function OwnerDrawer({
         setMinted({
           title: `New token for ${p.user.display_name}`,
           token,
-          tokenKind: result.bridge_token ? 'bridge' : 'invite',
-          participantName: p.user.display_name,
-          ownerHumanName: p.user.owner_user_id ? nameOf(p.user.owner_user_id) : p.user.display_name,
+          kind: result.bridge_token ? 'bridge' : 'invite',
+          who: p.user.display_name,
         });
       }
     } catch (err) {
@@ -242,40 +225,18 @@ export function OwnerDrawer({
         {error && <div className="form-error" role="alert">{error}</div>}
       </div>
 
-      {minted && (
-        <TokenModal
-          minted={minted}
-          roomId={roomId}
-          roomName={roomName}
-          serverUrl={serverUrl}
-          onClose={() => setMinted(null)}
-        />
-      )}
+      {minted && <TokenModal minted={minted} onClose={() => setMinted(null)} />}
     </div>
   );
 }
 
 function TokenModal({
   minted,
-  roomId,
-  roomName,
-  serverUrl,
   onClose,
 }: {
   minted: MintedToken;
-  roomId: string;
-  roomName: string;
-  serverUrl: string;
   onClose: () => void;
 }) {
-  const agentInput = {
-    serverUrl,
-    roomId,
-    agentName: minted.participantName,
-    ownerHumanName: minted.ownerHumanName,
-    bridgeToken: minted.token,
-  };
-
   return (
     <div className="modal-overlay" onClick={(e) => e.stopPropagation()}>
       <div className="modal card" role="dialog" aria-label="One-time token">
@@ -290,8 +251,7 @@ function TokenModal({
         </header>
 
         <p className="modal__warning">
-          This {minted.tokenKind === 'bridge' ? 'bridge' : 'invite'} token is shown <strong>once</strong>.
-          Copy it now and share it over a private channel.
+          Shown <strong>once</strong>. Copy it now and send it over a channel you trust.
         </p>
 
         <div className="token-box">
@@ -299,47 +259,11 @@ function TokenModal({
           <CopyButton text={minted.token} label="Copy token" />
         </div>
 
-        {minted.tokenKind === 'invite' ? (
-          <div className="snippet">
-            <div className="snippet__head">
-              <span className="snippet__title">Onboarding message for {minted.participantName}</span>
-              <CopyButton
-                text={humanOnboardingText({ serverUrl, roomName, inviteToken: minted.token })}
-                label="Copy"
-              />
-            </div>
-            <pre className="snippet__pre">
-              {humanOnboardingText({ serverUrl, roomName, inviteToken: minted.token })}
-            </pre>
-          </div>
-        ) : (
-          <>
-            <div className="snippet">
-              <div className="snippet__head">
-                <span className="snippet__title">~/.clausroom/bridge.toml</span>
-                <CopyButton text={bridgeToml(agentInput)} label="Copy" />
-              </div>
-              <pre className="snippet__pre">{bridgeToml(agentInput)}</pre>
-            </div>
-            <div className="snippet">
-              <div className="snippet__head">
-                <span className="snippet__title">Bridge token env var</span>
-                <CopyButton text={exportTokenLine(minted.token)} label="Copy" />
-              </div>
-              <pre className="snippet__pre">{exportTokenLine(minted.token)}</pre>
-            </div>
-            <div className="snippet">
-              <div className="snippet__head">
-                <span className="snippet__title">Connect Claude Code</span>
-                <CopyButton text={claudeMcpAddCommand()} label="Copy" />
-              </div>
-              <pre className="snippet__pre">{claudeMcpAddCommand()}</pre>
-            </div>
-            <div className="modal__foot">
-              <CopyButton text={agentOnboardingText(agentInput)} label="Copy full setup snippet" />
-            </div>
-          </>
-        )}
+        <p className="sidebar__hint">
+          {minted.kind === 'invite'
+            ? `${minted.who} pastes this on the login screen to sign in as themselves.`
+            : `${minted.who}'s bridge uses this to reach the room. It works only here.`}
+        </p>
       </div>
     </div>
   );

@@ -1,131 +1,105 @@
 <p align="center">
-  <img src="docs/assets/claus.png" width="150" alt="Clausroom crab" />
+  <img src="docs/assets/claus.png" width="150" alt="Claus, the clausroom crab" />
 </p>
 
 <h1 align="center">clausroom</h1>
 
-Clausroom is a private chatroom where two people and their coding agents can
-work together without sharing either machine or repository.
+A private chatroom where two people and their coding agents work on a problem
+together — without sharing either machine, either repository, or any port.
 
-## Install or update
+One person hosts. The other joins with one line of text. Both agents can read
+their own side's project and talk to each other in the room, while both humans
+watch and approve.
 
-Clausroom requires Node.js 20 or newer and either Codex or Claude Code.
+## Install
 
-On both machines, run this from the Clausroom checkout after cloning it or
-switching to a branch with CLI changes:
+Node.js 20 or newer, plus Claude Code or Codex. On both machines:
 
 ```bash
+git clone https://github.com/chengine/clausroom
+cd clausroom
 npm run install:cli
 ```
 
-The host keeps this source checkout because it runs the room server. If it is
-not at `~/StanfordMSL/clausroom`, set its location once:
+## Press play
+
+Both people do the same two things: edit one file, run one command.
 
 ```bash
-export CLAUSROOM_REPO=/path/to/clausroom
+clausroom host        # one of you
+clausroom connect     # the other
 ```
 
-## Quick start
+The first run writes `clausroom.toml` next to you and tells you where it is.
+Open it, set your name and your project directory, and run the command again:
 
-The host changes into the repository their agent should use and runs:
+```toml
+[me]
+name  = "Mikel"
+agent = "claude"          # claude | codex | none
+
+[partner]
+name = "Ada"
+
+[project]
+# The one directory your agent may read. Nothing outside it is reachable.
+dir = "~/work/depth-regularizer"
+```
+
+`clausroom host` prints one long line starting with `CLAUSROOM_PEER_OFFER`.
+Send that line to the other person however you normally talk. They paste it into
+`clausroom connect`, which prints a `CLAUSROOM_PEER_ANSWER` line to send back.
+Paste that into the still-running `host`, and the room opens in both browsers.
+
+There is no deadline on the paste, and a mistyped one just asks again. Neither
+person enters an IP address, a token, or a room id.
+
+## What each side can see
+
+Your agent gets a set of `room_*` tools — read the room, answer with evidence,
+ask a question, share a file. It can read the one directory you named and
+nothing else. Their agent can read theirs. Neither can reach across.
+
+Files never move without a human saying so: an agent that wants to share one
+creates a request, and the person who owns that agent approves it in the browser.
+Every message and every file is in the transcript; there is no side channel.
+
+Turn it up or down in `clausroom.toml`:
+
+```toml
+[agent]
+send_messages = true    # may post text into the room
+upload_files  = false   # may offer a file; you approve each one either way
+auto_reply    = false   # answers messages addressed to it with no human turn
+```
+
+`auto_reply = true` lets your agent answer on its own, with read-only tools, a
+per-answer time limit, and every reply still passing the same checks. The room is
+untrusted input to it, and it is told so.
+
+Every value in that file is used exactly as written. Nothing in it overrides
+anything else, and it never contains a token.
+
+## If you SSH into the machine that hosts
+
+Forward the same port you host on, then run `clausroom host` there:
 
 ```bash
-cd /path/to/host-repository
-clausroom host
+ssh -L 127.0.0.1:3000:127.0.0.1:3000 you@host-machine
+cd ~/work/depth-regularizer && clausroom host --no-open
 ```
 
-Send the complete `CLAUSROOM_PEER_OFFER ...` line privately to the other person.
+Because the port matches, the URL it prints works as-is on your laptop. Leave the
+SSH session running. The repository and the agent stay on the host machine.
 
-The guest changes into their own repository and runs:
+## Checking on things
 
 ```bash
-cd /path/to/guest-repository
-clausroom connect
+clausroom check       # is the config valid, and is the room reachable?
+clausroom project     # re-point your agent at the room after editing the config
 ```
 
-The guest pastes the offer, then sends the resulting
-`CLAUSROOM_PEER_ANSWER ...` line back to the host. The host pastes the answer.
-There is no short copy/paste deadline. Both commands open a local browser and
-remain running for the session.
+## Details
 
-If an offer or answer is pasted incorrectly, Clausroom reports the problem and
-prompts again without tearing down the room.
-
-That is the entire workflow: the host runs `host`; the guest runs `connect`.
-Neither person runs both commands or enters an IP address.
-
-Codex is configured by default. Use `--agent claude` for Claude Code:
-
-```bash
-clausroom host --agent claude
-clausroom connect --agent claude
-```
-
-Add `--auto` to let the selected agent answer room messages automatically:
-
-```bash
-clausroom connect --agent claude --auto
-```
-
-Auto-response stays inside the same running command. It uses the current
-directory, read-only agent tools, a five-minute response timeout, and no agent
-uploads unless uploads were separately enabled.
-
-Each command grants its local coding-agent bridge access only to the current
-directory. The other person cannot browse it. The encrypted WebRTC connection
-exposes no filesystem, SSH service, or public application port. Agent uploads
-are off unless `--allow-agent-uploads` is supplied and still require human
-approval.
-
-Detailed security and networking behavior:
-[Direct WebRTC peer mode](docs/PEER-CONNECT.md),
-[Security model](docs/SECURITY.md), and
-[Threat model](docs/THREAT_MODEL.md).
-
-## FAQ
-
-### What if I SSH into the host machine from my laptop?
-
-The host machine still runs Clausroom and owns the repository. Your laptop
-needs only SSH and a browser.
-
-From the laptop:
-
-```bash
-ssh -L 127.0.0.1:3000:127.0.0.1:3000 admin@171.64.160.63
-```
-
-In that SSH shell:
-
-```bash
-cd /path/to/host-repository
-clausroom host --no-open
-```
-
-Leave the SSH session running and open the private authenticated
-`http://127.0.0.1:3000/#clausroom-session=...` URL printed by the command on
-the laptop. Do not share that URL. The SSH forward carries only the local
-Clausroom web UI; the repository and agent remain on the host machine.
-
-### What if I SSH into the guest/connect machine from my laptop?
-
-Choose a fixed loopback port so it can be forwarded before the peer connection
-starts.
-
-From the laptop:
-
-```bash
-ssh -L 127.0.0.1:43001:127.0.0.1:43001 user@guest-machine
-```
-
-In that SSH shell:
-
-```bash
-cd /path/to/guest-repository
-clausroom connect --listen-port 43001 --no-open
-```
-
-Paste the host's offer and return the answer as usual. Leave SSH running and
-open the printed
-`http://127.0.0.1:43001/#clausroom-session=...` URL on the laptop. The
-repository and agent remain on the guest machine.
+- [How it works](docs/HOW-IT-WORKS.md) — the connection, the wire, the config reference.
+- [Security](docs/SECURITY.md) — what is enforced where, and what is not.

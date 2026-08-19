@@ -15,7 +15,7 @@ interface RoomsHomeProps {
 }
 
 export function RoomsHome({ token, me, onEnterRoom, onLogout, onUnauthorized }: RoomsHomeProps) {
-  const [rooms, setRooms] = useState<api.RoomMembership[] | null>(null);
+  const [rooms, setRooms] = useState<api.MeResponse['rooms'] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [newName, setNewName] = useState('');
   const [creating, setCreating] = useState(false);
@@ -65,7 +65,6 @@ export function RoomsHome({ token, me, onEnterRoom, onLogout, onUnauthorized }: 
           <span className="user-chip" title={me.id}>
             <span className="user-chip__dot" />
             {me.display_name}
-            {me.is_admin && <span className="user-chip__badge">admin</span>}
           </span>
           <button type="button" className="btn btn--ghost btn--sm" onClick={onLogout}>
             <ArrowLeftIcon size={14} /> Sign out

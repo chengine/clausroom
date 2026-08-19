@@ -7,8 +7,8 @@ body:
     attributes:
       label: Your question
       description: >
-        What are you trying to do? Check the README, `docs/API-CONTRACT.md`,
-        and `examples/` first — link to what you already read if relevant.
+        What are you trying to do? Check the README and `docs/HOW-IT-WORKS.md`
+        first — link to what you already read if relevant.
     validations:
       required: true
   - type: input

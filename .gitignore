@@ -23,3 +23,6 @@ data/
 # scratch space
 scratch/
 scratch
+
+# local configuration and state
+clausroom.toml

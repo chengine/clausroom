@@ -1,255 +1,190 @@
+#!/usr/bin/env node
 /**
- * clausroom server entry point: env parsing, first-run bootstrap, express app,
- * WebSocket upgrade, listen. Binding stdout lines (docs/API-CONTRACT.md §2/§14):
+ * The room server. Loopback only, one SQLite file, one data directory.
  *
- *   CLAUSROOM_BOOTSTRAP_INVITE <arit_ token>   (first run only)
- *   CLAUSROOM_RECOVERY_INVITE <arit_ token>    (only when an admin human is locked out, §2)
- *   CLAUSROOM_LISTENING <actual-port>          (every run, once listening)
- *   MSG <room_id> <sender_id> <message_type>   (every accepted message)
+ *   node dist/index.js [--port 3000] [--data ./data]
  *
- * Raw tokens are never logged except the one-time bootstrap/recovery invite lines.
+ * Three lines on stdout are meant to be read by a program:
+ *   CLAUSROOM_INVITE <arit_…>     once per boot, for the owner's browser
+ *   CLAUSROOM_LISTENING <port>    once listening
+ *   MSG <room> <sender> <type>    per accepted message
  */
 import fs from 'node:fs';
 import http from 'node:http';
+import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import multer from 'multer';
-import { genId, newInviteToken, sha256Hex } from '@clausroom/protocol';
-import { loadConfig } from './env.js';
-import { HttpError, notFound, tooLarge, validation } from './errors.js';
-import { nowIso, Store, type UserRow } from './db.js';
-import { authMiddleware, isSessionExpired } from './auth.js';
-import { MessageRateLimiter } from './policy.js';
-import { WsHub } from './ws.js';
-import { startRetentionSweep } from './retention.js';
-import { mountStatic, resolveWebDist } from './static.js';
-import { authRoutes } from './routes/auth.js';
-import { roomRoutes } from './routes/rooms.js';
-import { participantRoutes } from './routes/participants.js';
-import { pauseRoutes } from './routes/pause.js';
-import { summaryRoutes } from './routes/summary.js';
-import { messageRoutes } from './routes/messages.js';
-import { artifactRoutes } from './routes/artifacts.js';
-import { approvalRoutes } from './routes/approvals.js';
-import { exportRoutes } from './routes/export.js';
+import { genId, newToken, sha256Hex } from '@clausroom/protocol';
+import { Store } from './db.js';
+import { HttpError, fail } from './room.js';
+import { routes } from './routes.js';
+import { Hub } from './ws.js';
 
-/**
- * First-run bootstrap: with an empty users table, create the admin "Host"
- * human, the singleton "System" user, and mint a one-time invite for Host.
- * Returns the raw invite token (to be printed once) or null on later runs.
- */
-function bootstrap(store: Store): string | null {
-  if (store.countUsers() > 0) return null;
-  const now = nowIso();
-  const hostId = genId('user');
-  const inviteToken = newInviteToken();
-  store.transaction(() => {
-    store.insertUser({
-      id: hostId,
-      display_name: 'Host',
-      email: null,
-      kind: 'human',
-      is_admin: 1,
-      owner_user_id: null,
-      created_at: now,
-    });
-    store.insertUser({
-      id: genId('user'),
-      display_name: 'System',
-      email: null,
-      kind: 'system',
-      is_admin: 0,
-      owner_user_id: null,
-      created_at: now,
-    });
-    store.insertToken({
-      id: genId('tok'),
-      kind: 'invite',
-      token_hash: sha256Hex(inviteToken),
-      user_id: hostId,
-      room_id: null,
-      name: 'bootstrap',
-      created_at: now,
-      last_used_at: null,
-      used_at: null,
-      revoked_at: null,
-    });
-  });
-  return inviteToken;
+const CSP =
+  "default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data:; " +
+  "style-src 'self' 'unsafe-inline'; script-src 'self'; base-uri 'none'; " +
+  "frame-ancestors 'none'; form-action 'self'";
+
+const NOT_BUILT = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>clausroom</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:40rem;margin:4rem auto">
+<h1>clausroom is running</h1><p>The web UI is not built yet — run <code>npm run build</code>
+and reload.</p></body></html>
+`;
+
+/** `--port`, `--data`, `--owner`, and nothing else. */
+function options(argv: string[]): { port: number; data: string; owner: string } {
+  let port = 3000;
+  let data = './data';
+  let owner = 'Host';
+  for (let i = 0; i < argv.length; i += 2) {
+    const value = argv[i + 1];
+    if (value === undefined) throw new Error(`${argv[i]} needs a value`);
+    else if (argv[i] === '--port') port = Number(value);
+    else if (argv[i] === '--data') data = value;
+    else if (argv[i] === '--owner') owner = value;
+    else throw new Error('usage: clausroom-server [--port <n>] [--data <dir>] [--owner <name>]');
+  }
+  if (!Number.isInteger(port) || port < 0 || port > 65535) {
+    throw new Error(`--port must be an integer from 0 to 65535 (got ${port})`);
+  }
+  return { port, data: path.resolve(data.replace(/^~(?=$|\/)/, os.homedir())), owner };
 }
 
 /**
- * Owner-lockout recovery (docs/API-CONTRACT.md §2): if an admin human (the
- * bootstrap Host) no longer holds ANY usable credential — every invite used or
- * revoked, every session token revoked or TTL-expired — they could never get
- * back in: minting a fresh invite requires an authenticated owner session,
- * i.e. exactly what they lost. On startup, detect that state and mint a fresh
- * single-use invite per locked-out admin, printed once like the bootstrap
- * line. Restarting the server is the in-band recovery path.
+ * Make sure the owner and the System author exist, name the owner from the
+ * config, then mint them a fresh single-use invite. Minting unconditionally on
+ * every boot is what keeps the launcher stateless: there is no cached session to
+ * expire and no way to lock yourself out of your own room.
  */
-function recoverAdminAccess(
-  store: Store,
-  sessionTtlDays: number,
-): Array<{ user: UserRow; invite: string }> {
-  const recovered: Array<{ user: UserRow; invite: string }> = [];
-  const nowMs = Date.now();
-  for (const admin of store.getAdminHumans()) {
-    const usable = store.listUserAuthTokens(admin.id).some((t) =>
-      t.kind === 'invite' ? t.used_at === null : !isSessionExpired(t, sessionTtlDays, nowMs),
-    );
-    if (usable) continue;
-    const invite = newInviteToken();
-    store.insertToken({
-      id: genId('tok'),
-      kind: 'invite',
-      token_hash: sha256Hex(invite),
-      user_id: admin.id,
-      room_id: null,
-      name: 'recovery',
-      created_at: nowIso(),
-      last_used_at: null,
-      used_at: null,
-      revoked_at: null,
-    });
-    recovered.push({ user: admin, invite });
-  }
-  return recovered;
+function bootInvite(store: Store, ownerName: string): string {
+  const invite = newToken('invite');
+  store.transaction(() => {
+    const existing = store.ownerUser();
+    const owner =
+      existing ??
+      store.addUser({
+        id: genId('user'),
+        display_name: ownerName,
+        kind: 'human',
+        owner_user_id: null,
+      });
+    if (!existing) {
+      store.addUser({
+        id: genId('user'),
+        display_name: 'System',
+        kind: 'system',
+        owner_user_id: null,
+      });
+    } else if (existing.display_name !== ownerName) {
+      store.rename(existing.id, ownerName);
+    }
+    store.addToken('invite', sha256Hex(invite), owner.id, null);
+  });
+  return invite;
+}
+
+/** The built web UI, next to this package whether running from src or dist. */
+function webDist(): string {
+  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'web', 'dist');
 }
 
 function main(): void {
-  const config = loadConfig(process.env);
+  const { port, data, owner } = options(process.argv.slice(2));
+  fs.mkdirSync(data, { recursive: true });
 
-  fs.mkdirSync(path.resolve(config.artifactDir), { recursive: true });
-  const store = new Store(config.dbPath);
-  const bootstrapInvite = bootstrap(store);
-  if (bootstrapInvite) {
-    console.log(`CLAUSROOM_BOOTSTRAP_INVITE ${bootstrapInvite}`);
-  } else {
-    for (const { user, invite } of recoverAdminAccess(store, config.sessionTtlDays)) {
-      console.log(`CLAUSROOM_RECOVERY_INVITE ${invite}`);
-      console.error(
-        `[clausroom] every credential of admin "${user.display_name}" (${user.id}) was ` +
-          'expired, used, or revoked — minted the fresh single-use invite above; ' +
-          'log in with it via the web UI.',
-      );
-    }
-  }
+  const store = new Store(path.join(data, 'clausroom.sqlite'));
+  process.stdout.write(`CLAUSROOM_INVITE ${bootInvite(store, owner)}\n`);
 
-  const hub = new WsHub(store, config.sessionTtlDays);
-  const rateLimiter = new MessageRateLimiter();
-  // Retention sweep: once on boot, then every 10 minutes (unref()'d interval).
-  const stopRetentionSweep = startRetentionSweep(store);
-
+  const hub = new Hub(store);
   const app = express();
   app.disable('x-powered-by');
-  app.use((req, res, next) => {
+  app.use((_req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('Referrer-Policy', 'no-referrer');
-    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
-    res.setHeader(
-      'Content-Security-Policy',
-      "default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data:; " +
-        "style-src 'self' 'unsafe-inline'; script-src 'self'; base-uri 'none'; " +
-        "frame-ancestors 'none'; form-action 'self'",
-    );
+    res.setHeader('Content-Security-Policy', CSP);
     next();
   });
 
   app.get('/healthz', (_req, res) => {
-    res.status(200).json({ ok: true });
+    res.json({ ok: true });
   });
-
-  // JSON body limit: 1 MB (413 too_large — mapped in the error handler).
   app.use(express.json({ limit: 1048576 }));
+  app.use('/api', routes(store, hub, data));
+  app.use('/api', (_req, _res, next: NextFunction) => next(fail('not_found', 'Unknown API route.')));
 
-  // /api/auth/login (no auth) + /api/me (self-authenticated).
-  app.use('/api', authRoutes(store, config.sessionTtlDays));
-  // Everything else under /api requires a session or bridge token.
-  app.use('/api', authMiddleware(store, config.sessionTtlDays));
-  app.use('/api', roomRoutes(store, config));
-  app.use('/api', participantRoutes(store));
-  app.use('/api', pauseRoutes(store, hub));
-  app.use('/api', summaryRoutes(store, hub));
-  app.use('/api', messageRoutes(store, hub, config, rateLimiter));
-  app.use('/api', artifactRoutes(store, hub, config));
-  app.use('/api', approvalRoutes(store, hub));
-  app.use('/api', exportRoutes(store));
-
-  // Unknown /api routes -> 404 ApiError envelope.
-  app.use('/api', (_req: Request, _res: Response, next: NextFunction) => {
-    next(notFound('Unknown API route.'));
+  // The web UI, with an SPA fallback for client-side routes.
+  const dist = webDist();
+  app.use(express.static(dist));
+  app.get('*', (req, res, next) => {
+    if (/^\/(api|ws|healthz)/.test(req.path)) return next();
+    const index = path.join(dist, 'index.html');
+    if (fs.existsSync(index)) res.sendFile(index);
+    else res.type('html').send(NOT_BUILT);
   });
 
-  // Static web UI with SPA fallback (or inline info page when not built).
-  mountStatic(app, resolveWebDist(config.webDist));
-
-  // Error handler: every non-2xx body is the binding ApiError envelope.
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
-    if (res.headersSent) {
-      res.destroy();
-      return;
-    }
-    let httpError: HttpError;
-    if (err instanceof HttpError) {
-      httpError = err;
-    } else if (err instanceof multer.MulterError) {
-      httpError =
-        err.code === 'LIMIT_FILE_SIZE'
-          ? tooLarge('Upload exceeds the maximum allowed size.')
-          : validation(`Invalid multipart upload: ${err.message}`);
-    } else if (isBodyParserError(err, 'entity.too.large')) {
-      httpError = tooLarge('JSON body exceeds the 1 MB limit.');
-    } else if (isBodyParserError(err, 'entity.parse.failed')) {
-      httpError = validation('Request body is not valid JSON.');
-    } else {
-      console.error('[clausroom] unhandled error:', err);
-      httpError = new HttpError(500, 'validation', 'Internal server error.');
-    }
-    res
-      .status(httpError.status)
-      .json({ error: { code: httpError.code, message: httpError.message } });
+    if (res.headersSent) return res.destroy();
+    const mapped =
+      err instanceof HttpError
+        ? err
+        : err instanceof multer.MulterError
+          ? fail(
+              err.code === 'LIMIT_FILE_SIZE' ? 'too_large' : 'validation',
+              err.code === 'LIMIT_FILE_SIZE'
+                ? 'That upload is over the size limit.'
+                : `Invalid upload: ${err.message}`,
+            )
+          : isBodyError(err, 'entity.too.large')
+            ? fail('too_large', 'The request body is over the 1 MB limit.')
+            : isBodyError(err, 'entity.parse.failed')
+              ? fail('validation', 'The request body is not valid JSON.')
+              : null;
+    if (!mapped) console.error('[clausroom] unhandled error:', err);
+    const status = mapped?.status ?? 500;
+    const code = mapped?.code ?? 'validation';
+    const message = mapped?.message ?? 'Internal server error.';
+    res.status(status).json({ error: { code, message } });
   });
 
   const server = http.createServer(app);
   hub.attach(server);
-
-  server.listen(config.port, config.host, () => {
+  server.listen(port, '127.0.0.1', () => {
     const address = server.address();
-    const port =
-      address && typeof address === 'object' ? address.port : config.port;
-    console.log(`CLAUSROOM_LISTENING ${port}`);
+    process.stdout.write(
+      `CLAUSROOM_LISTENING ${address && typeof address === 'object' ? address.port : port}\n`,
+    );
   });
 
-  // Graceful shutdown: stop the sweep, close ws server, http server, then the database.
-  let shuttingDown = false;
-  const shutdown = () => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    stopRetentionSweep();
+  let stopping = false;
+  const stop = (): void => {
+    if (stopping) return;
+    stopping = true;
     hub.close();
     server.close(() => {
       store.close();
       process.exit(0);
     });
-    // Fallback if lingering connections keep the server open.
+    // A lingering connection must not keep the process alive forever.
     setTimeout(() => {
       store.close();
       process.exit(0);
     }, 3000).unref();
   };
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', stop);
+  process.on('SIGTERM', stop);
 }
 
-function isBodyParserError(err: unknown, type: string): boolean {
-  return (
-    typeof err === 'object' &&
-    err !== null &&
-    'type' in err &&
-    (err as { type?: unknown }).type === type
-  );
+function isBodyError(err: unknown, type: string): boolean {
+  return typeof err === 'object' && err !== null && (err as { type?: unknown }).type === type;
 }
 
-main();
+try {
+  main();
+} catch (err) {
+  process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+  process.exit(1);
+}

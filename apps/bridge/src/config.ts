@@ -1,20 +1,24 @@
 /**
- * Bridge configuration: parse ~/.clausroom/bridge.toml (or --config path) with
- * smol-toml, validate with zod, and resolve the bridge token from the env var
- * named by [room].token_env. Shape is BINDING per docs/API-CONTRACT.md §13.
+ * clausroom.toml — the whole configuration, in one file.
+ *
+ * Every value in it is used exactly as written: nothing here silently overrides
+ * anything else, and no setting changes meaning depending on whether another
+ * one is present. The file holds only choices. Facts discovered when a room
+ * starts (its id, its URL, the agent's token) live in the session file instead,
+ * so you never have to paste a credential into your config.
+ *
+ * Looked for at --config, then ./clausroom.toml, then ~/.clausroom/clausroom.toml.
+ * If there is none, one is written with the defaults below and used immediately.
  */
-
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { parse as parseToml } from 'smol-toml';
 import { z } from 'zod';
-import { DEFAULTS, TOKEN_PREFIXES } from '@clausroom/protocol';
+import { expandHome, log } from './util.js';
 
-/** Default config file location. */
-export const DEFAULT_CONFIG_PATH = '~/.clausroom/bridge.toml';
+const CONFIG_NAME = 'clausroom.toml';
 
-/** Thrown for any configuration problem; the message is meant for humans. */
 export class ConfigError extends Error {
   constructor(message: string) {
     super(message);
@@ -22,236 +26,184 @@ export class ConfigError extends Error {
   }
 }
 
-/** Expand a leading `~` or `~/` to the current user's home directory. */
-export function expandHome(p: string): string {
-  if (p === '~') return os.homedir();
-  if (p.startsWith('~/') || p.startsWith('~\\')) {
-    return path.join(os.homedir(), p.slice(2));
-  }
-  return p;
-}
-
-const IdentitySchema = z.object({
-  human_name: z.string().min(1, 'identity.human_name is required'),
-  agent_name: z.string().min(1, 'identity.agent_name is required'),
-  bridge_name: z.string().min(1, 'identity.bridge_name is required'),
-});
-
-const RoomSectionSchema = z.object({
-  server_url: z
-    .string()
-    .min(1, 'room.server_url is required')
-    .transform((s) => s.replace(/\/+$/, ''))
-    .refine(
-      (s) => {
-        try {
-          const u = new URL(s);
-          return u.protocol === 'http:' || u.protocol === 'https:';
-        } catch {
-          return false;
-        }
-      },
-      { message: 'room.server_url must be an http(s) URL' },
-    ),
-  room_id: z.string().min(1, 'room.room_id is required'),
-  token_env: z.string().min(1).default('AGENT_ROOM_BRIDGE_TOKEN'),
-});
-
-const PolicySectionSchema = z.object({
-  read_only_default: z.boolean().default(true),
-  allow_agent_to_send_text: z.boolean().default(true),
-  allow_agent_to_upload_files: z.boolean().default(false),
-  require_human_approval_for_uploads: z.boolean().default(true),
-  max_upload_bytes_without_approval: z
-    .number()
-    .int()
-    .positive()
-    .default(DEFAULTS.REQUIRE_APPROVAL_BYTES),
-  max_upload_bytes_absolute: z.number().int().positive().default(DEFAULTS.MAX_UPLOAD_BYTES),
-});
-
-const FilesystemSectionSchema = z.object({
-  /** Uploads must resolve (after symlinks) inside one of these directories. */
-  roots: z.array(z.string().min(1)).default([]),
-  /** ADDED to DEFAULT_DENY_GLOBS from @clausroom/protocol, never replacing them. */
-  deny_globs: z.array(z.string().min(1)).default([]),
-  /** Optional; default is ~/.clausroom/downloads/<room_id>. */
-  downloads_dir: z.string().min(1).optional(),
-});
-
-/** Engines supported by `clausroom-bridge auto` (contract §13 `[auto]`). */
-export const AUTO_ENGINES = ['claude', 'codex', 'custom'] as const;
-export type AutoEngine = (typeof AUTO_ENGINES)[number];
-
-/**
- * The `[auto]` table (contract §13). Only the `auto` subcommand reads it —
- * `mcp`/`check` ignore it entirely, so it is carried through BridgeConfigSchema
- * as `unknown` and validated lazily by parseAutoConfig(). A broken [auto]
- * table must never stop the MCP server from starting.
- */
-const AutoSectionSchema = z.object({
-  engine: z.enum(AUTO_ENGINES, {
-    errorMap: () => ({
-      message: `auto.engine must be one of: ${AUTO_ENGINES.join(', ')}`,
-    }),
+const Schema = z.object({
+  me: z.object({
+    name: z.string().min(1).max(100),
+    agent: z.enum(['claude', 'codex', 'none']),
   }),
-  /** Engine working directory. MUST realpath-resolve inside a [filesystem].roots entry. */
-  workdir: z.string().min(1, 'auto.workdir is required'),
-  /** Tools granted to the engine; read-only by default, on purpose. */
-  allowed_tools: z.array(z.string().min(1)).default(['Read', 'Grep', 'Glob']),
-  /** Model override passed to the engine; engine default when unset. */
-  model: z.string().min(1).optional(),
-  /** Engine-internal turn cap per run. */
-  max_turns: z.number().int().positive().default(25),
-  /** Wall-clock cap per engine run; on expiry the run is killed, no reply posted. */
-  timeout_seconds: z.number().int().positive().default(300),
-  /** Max recent room messages included in the composed prompt. */
-  max_context_messages: z.number().int().positive().default(30),
-  /** 'addressed': recipient_ids includes me, or empty and sender != me. 'mentions_only': explicit only. */
-  respond_to: z.enum(['addressed', 'mentions_only']).default('addressed'),
-  /** argv array for engine = 'custom' (never run through a shell). */
-  custom_command: z.array(z.string().min(1)).default([]),
-  /** Extra argv appended to the engine CLI invocation. */
-  extra_args: z.array(z.string()).default([]),
-  /** When true, skip the prompt scaffolding: the triggering message body is the prompt. */
-  bare: z.boolean().default(false),
-  /** Per-run budget cap for engines that support one; unset = no cap. */
-  max_budget_usd: z.number().positive().optional(),
+  partner: z.object({
+    name: z.string().min(1).max(100),
+  }),
+  room: z.object({
+    name: z.string().min(1).max(200),
+  }),
+  project: z.object({
+    dir: z.string().min(1),
+  }),
+  agent: z.object({
+    send_messages: z.boolean(),
+    upload_files: z.boolean(),
+    max_upload_mb: z.number().positive().max(100),
+    auto_reply: z.boolean(),
+    tools: z.array(z.string().min(1)),
+    model: z.string(),
+    timeout_seconds: z.number().int().positive(),
+    context_messages: z.number().int().positive(),
+    command: z.array(z.string().min(1)),
+  }),
+  server: z.object({
+    port: z.number().int().min(0).max(65535),
+    data: z.string().min(1),
+  }),
+  peer: z.object({
+    stun: z.array(z.string().min(1)),
+    port: z.number().int().min(0).max(65535),
+  }),
 });
 
-export type AutoConfig = z.infer<typeof AutoSectionSchema>;
-
-export const BridgeConfigSchema = z.object({
-  identity: IdentitySchema,
-  room: RoomSectionSchema,
-  policy: PolicySectionSchema.default({}),
-  filesystem: FilesystemSectionSchema.default({}),
-  /** Raw [auto] table; validated only by the `auto` subcommand (parseAutoConfig). */
-  auto: z.unknown().optional(),
-});
-
-export type BridgeConfig = z.infer<typeof BridgeConfigSchema>;
+export type Config = z.infer<typeof Schema> & {
+  /** Absolute path of the file this came from. */
+  file: string;
+};
 
 /**
- * Validate the `[auto]` table for `clausroom-bridge auto` (contract §13).
- * Throws ConfigError when the table is missing or invalid. The workdir is
- * expanded/resolved here; its roots-containment check needs the filesystem and
- * lives in policy.ts (checkWorkdirPolicy) because it must resolve symlinks.
+ * The file written when there is none, and the reference for every key. The
+ * project directory defaults to wherever the command was run, which is almost
+ * always the project you meant.
  */
-export function parseAutoConfig(cfg: BridgeConfig): AutoConfig {
-  if (cfg.auto === undefined) {
-    throw new ConfigError(
-      'The [auto] section is missing from bridge.toml — it is required for `clausroom-bridge auto`.\n' +
-        'Minimal example:\n  [auto]\n  engine  = "claude"\n  workdir = "/path/inside/a/filesystem/root"\n' +
-        'See docs/API-CONTRACT.md §13 for the full reference.',
-    );
-  }
-  const parsed = AutoSectionSchema.safeParse(cfg.auto);
-  if (!parsed.success) {
-    const issues = parsed.error.issues
-      .map((i) => `  - auto.${i.path.join('.') || '(root)'}: ${i.message}`)
-      .join('\n');
-    throw new ConfigError(`Invalid [auto] section in bridge.toml:\n${issues}`);
-  }
-  const auto = parsed.data;
-  if (auto.engine === 'custom' && auto.custom_command.length === 0) {
-    throw new ConfigError(
-      'auto.engine = "custom" requires auto.custom_command — a non-empty argv array, ' +
-        'e.g. custom_command = ["/usr/local/bin/my-engine", "--answer"]. ' +
-        'The bridge writes the prompt to its stdin and posts its stdout as the reply.',
-    );
-  }
-  if (auto.engine !== 'custom' && auto.custom_command.length > 0) {
-    throw new ConfigError(
-      `auto.custom_command is only allowed when auto.engine = "custom" (engine is "${auto.engine}").`,
-    );
-  }
-  auto.workdir = path.resolve(expandHome(auto.workdir));
-  return auto;
+function template(): string {
+  return `# clausroom — the whole configuration. Every value is used exactly as written.
+# Room ids, URLs, and tokens are never stored here; they belong to a session.
+
+[me]
+name  = ${quote(os.userInfo().username || 'Me')}
+agent = "claude"          # claude | codex | none
+
+[partner]
+name = "Guest"            # how the other person appears in the room
+
+[room]
+name = "clausroom"
+
+[project]
+# The one directory your agent may read from and upload from. A relative path is
+# resolved against this file. Nothing outside it is reachable, and neither is
+# your partner's copy.
+dir = ${quote(process.cwd())}
+
+[agent]
+send_messages   = true    # may post text into the room
+upload_files    = false   # may offer a file; you approve every one either way
+max_upload_mb   = 25
+auto_reply      = false   # answers messages addressed to it with no human turn
+
+# Read only when auto_reply = true.
+tools            = ["Read", "Grep", "Glob"]   # read-only on purpose
+model            = ""     # "" = whatever the agent defaults to
+timeout_seconds  = 300    # a run over this is killed and nothing is posted
+context_messages = 30     # recent room messages included in the prompt
+command          = []     # non-empty = run this argv instead of the agent CLI
+
+[server]
+# Only the host runs a server; it binds 127.0.0.1 and nothing else.
+port = 3000
+data = "~/.clausroom/data"
+
+[peer]
+# STUN only discovers a direct path. TURN relays are refused, so if the two
+# networks cannot reach each other the connection fails instead of relaying.
+stun = ["stun:stun.cloudflare.com:3478", "stun:stun.l.google.com:19302"]
+port = 0                  # loopback port for the guest's browser; 0 = any free
+`;
+}
+
+function quote(value: string): string {
+  return JSON.stringify(value);
+}
+
+/** --config, else ./clausroom.toml, else ~/.clausroom/clausroom.toml. */
+function locate(explicit: string | undefined): string {
+  if (explicit) return path.resolve(expandHome(explicit));
+  const local = path.resolve(CONFIG_NAME);
+  if (fs.existsSync(local)) return local;
+  return path.join(os.homedir(), '.clausroom', CONFIG_NAME);
 }
 
 /**
- * Load, parse, and validate the bridge config file.
- * Home-relative paths in [filesystem] are expanded; roots are made absolute.
+ * Load the config, writing the template first if the file does not exist. The
+ * returned paths are absolute: `project.dir` resolves against the config file's
+ * own directory, so moving the file moves the project with it.
  */
-export function loadConfig(configPath?: string): BridgeConfig {
-  const rawPath = configPath && configPath.length > 0 ? configPath : DEFAULT_CONFIG_PATH;
-  const resolved = path.resolve(expandHome(rawPath));
-
-  let text: string;
-  try {
-    text = fs.readFileSync(resolved, 'utf8');
-  } catch (err) {
-    throw new ConfigError(
-      `Cannot read bridge config at ${resolved}: ${err instanceof Error ? err.message : String(err)}\n` +
-        `Create it (default location ${DEFAULT_CONFIG_PATH}) or pass --config <path>. See docs/API-CONTRACT.md §13 for the shape.`,
-    );
+export function loadConfig(explicit?: string): Config {
+  const file = locate(explicit);
+  if (!fs.existsSync(file)) {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, template(), { mode: 0o600 });
+    log(`[clausroom] wrote ${file} — edit it any time; using its defaults now.`);
   }
 
   let data: unknown;
   try {
-    data = parseToml(text);
+    data = parseToml(fs.readFileSync(file, 'utf8'));
   } catch (err) {
     throw new ConfigError(
-      `Invalid TOML in ${resolved}: ${err instanceof Error ? err.message : String(err)}`,
+      `${file} is not valid TOML: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
 
-  const parsed = BridgeConfigSchema.safeParse(data);
+  const parsed = Schema.safeParse(data);
   if (!parsed.success) {
-    const issues = parsed.error.issues
-      .map((i) => `  - ${i.path.join('.') || '(root)'}: ${i.message}`)
-      .join('\n');
-    throw new ConfigError(`Invalid bridge config ${resolved}:\n${issues}`);
+    throw new ConfigError(
+      `${file} is missing or has invalid settings:\n${parsed.error.issues
+        .map((i) => `  ${i.path.join('.') || '(root)'}: ${i.message}`)
+        .join('\n')}\nDelete the file to have a fresh one written with every key.`,
+    );
   }
 
-  const cfg = parsed.data;
+  const config: Config = { ...parsed.data, file };
+  const base = path.dirname(file);
+  config.project.dir = path.resolve(base, expandHome(config.project.dir));
+  config.server.data = path.resolve(base, expandHome(config.server.data));
 
-  // Contract §13: read_only_default = true means "only read/status tools work
-  // unless overridden below". Write-permission flags NOT explicitly set in the
-  // TOML therefore default to false (not to their permissive zod defaults).
-  if (cfg.policy.read_only_default) {
-    const rawPolicy =
-      typeof data === 'object' && data !== null && 'policy' in data
-        ? (data as Record<string, unknown>).policy
-        : undefined;
-    const explicitlySet = (key: string): boolean =>
-      typeof rawPolicy === 'object' && rawPolicy !== null && key in rawPolicy;
-    if (!explicitlySet('allow_agent_to_send_text')) {
-      cfg.policy.allow_agent_to_send_text = false;
+  if (config.agent.auto_reply && config.me.agent === 'none' && config.agent.command.length === 0) {
+    throw new ConfigError(
+      `${file}: agent.auto_reply is true but me.agent is "none" and agent.command is empty, ` +
+        'so there is nothing to answer with. Set me.agent to claude or codex.',
+    );
+  }
+  if (config.agent.auto_reply && !config.agent.send_messages) {
+    throw new ConfigError(
+      `${file}: agent.auto_reply is true but agent.send_messages is false, so every ` +
+        'answer would be refused before it was sent. Set send_messages = true.',
+    );
+  }
+  for (const url of config.peer.stun) {
+    if (!url.startsWith('stun:') && !url.startsWith('stuns:')) {
+      throw new ConfigError(
+        `${file}: peer.stun accepts only stun:/stuns: URLs (got "${url}"). ` +
+          'TURN relays are refused because peer mode is direct-only.',
+      );
     }
-    if (!explicitlySet('allow_agent_to_upload_files')) {
-      cfg.policy.allow_agent_to_upload_files = false;
-    }
   }
-
-  cfg.filesystem.roots = cfg.filesystem.roots.map((r) => path.resolve(expandHome(r)));
-  if (cfg.filesystem.downloads_dir) {
-    cfg.filesystem.downloads_dir = path.resolve(expandHome(cfg.filesystem.downloads_dir));
+  if (config.project.dir === path.parse(config.project.dir).root) {
+    throw new ConfigError(`${file}: project.dir cannot be the filesystem root.`);
   }
-  return cfg;
+  if (config.project.dir === path.resolve(os.homedir())) {
+    throw new ConfigError(
+      `${file}: project.dir cannot be your home directory. Point it at one project.`,
+    );
+  }
+  return config;
 }
 
-/**
- * Resolve the bridge token from the environment variable named by
- * [room].token_env. Errors clearly if the variable is unset or empty.
- * Warns (to stderr, via the returned warning) if the value does not look like
- * a bridge token.
- */
-export function resolveToken(cfg: BridgeConfig): { token: string; warning: string | null } {
-  const envName = cfg.room.token_env;
-  const token = process.env[envName];
-  if (token === undefined || token.trim() === '') {
-    throw new ConfigError(
-      `Bridge token env var ${envName} is not set (named by [room].token_env in the config).\n` +
-        `Export the arbt_ bridge token given by the room owner, e.g.:\n` +
-        `  export ${envName}="arbt_..."`,
-    );
-  }
-  const trimmed = token.trim();
-  let warning: string | null = null;
-  if (!trimmed.startsWith(TOKEN_PREFIXES.bridge)) {
-    warning = `warning: ${envName} does not start with "${TOKEN_PREFIXES.bridge}" — it may not be a bridge token.`;
-  }
-  return { token: trimmed, warning };
+/** One line describing what the agent may do, for logs and room_get_status. */
+export function summary(config: Config): string {
+  const { agent } = config;
+  return [
+    `project ${config.project.dir}`,
+    `send text ${agent.send_messages ? 'allowed' : 'DENIED'}`,
+    `uploads ${agent.upload_files ? 'allowed, each one approved by you' : 'DENIED'}`,
+    `max upload ${agent.max_upload_mb} MB`,
+    `auto reply ${agent.auto_reply ? `on (${config.me.agent}, tools ${agent.tools.join(', ')})` : 'off'}`,
+  ].join('; ');
 }

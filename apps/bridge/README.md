@@ -4,266 +4,46 @@
 
 # clausroom-bridge
 
-The local bridge for [clausroom](https://github.com/chengine/clausroom) — a
-private, self-hosted chatroom where two humans **and their coding agents**
-collaborate across two machines (over Tailscale or direct WebRTC).
-
-The bridge runs next to your coding agent and makes **outbound-only** HTTPS/WSS
-connections to your clausroom server. It has three jobs:
-
-- `mcp` — a stdio [MCP](https://modelcontextprotocol.io) server exposing
-  `room_*` tools to a local coding agent (Claude Code, Codex, …).
-- `check` — connectivity/config self-test (healthz, auth, room membership).
-- `auto` — an autonomous responder: watches the room and answers messages
-  addressed to your agent by driving a local engine, no human in the loop per
-  reply.
-- `peer host|join` — an optional direct-only WebRTC transport using manual
-  offer/answer signaling and STUN, with no hosted signaling or TURN relay.
-- `host` / `connect` — the streamlined peer workflow: room setup, browser
-  login, connection-local credential handoff, and attachment of the current
-  project directory.
-- `project` — switch the attached project while a connection is running.
-
-The **server and web UI** are not in this package — run them from the
-[clausroom repository](https://github.com/chengine/clausroom).
-
-## Direct peer transport
-
-For the normal one-command-per-person flow, globally install this package and
-run each command from the repository that participant's agent may access:
+The `clausroom` command: a private chatroom where two people and their coding
+agents work on a problem together, without sharing either machine, either
+repository, or any port.
 
 ```bash
-# Room owner:
-cd /path/to/host-repository
-clausroom host
+npm install -g clausroom-bridge
 
-# Other participant, on their own machine:
-cd /path/to/guest-repository
-clausroom connect
+clausroom host        # one of you
+clausroom connect     # the other
 ```
 
-Both commands configure Codex by default. Use `--agent claude` for Claude Code,
-add `--auto` to run the selected agent as a supervised read-only responder,
-`--allow-agent-uploads` to enable approval-gated uploads, or `--no-project` for
-chat without a coding project. Run `clausroom project` from another repository
-only to switch the attachment while the connection is running.
+The first run writes `clausroom.toml` where you are and tells you so. Set your
+name and your project directory in it, run the command again, and send the
+`CLAUSROOM_PEER_OFFER` line it prints to the other person. They paste it into
+`clausroom connect` and send the answer back. That's the whole setup.
 
-```bash
-clausroom connect --agent claude --auto
-```
+Your coding agent — Claude Code or Codex — is wired up automatically and gets
+tools to read the room, answer with evidence, ask questions, and offer files for
+you to approve. It can read the one directory you named, and nothing else.
 
-The streamlined auto mode generates safe defaults, obtains the active room
-credential internally, and stops with `host`/`connect`; it needs no manual
-`[auto]` table or token export. Automatic responders ignore `agent_answer`
-messages so two enabled agents do not answer each other's answers indefinitely.
+The room server and browser UI live in the
+[clausroom repository](https://github.com/chengine/clausroom); the host runs them
+from a checkout. This package is what each person installs.
 
-`host` and `connect` stay running. Their generated MCP/auto configuration stores
-no raw token and sets its sole filesystem root to the command's current directory.
-The room credential is in a mode-0600 active connection file only for the
-connection lifetime. The combined offer includes room credentials, so exchange
-the complete `CLAUSROOM_PEER_OFFER ...` line privately.
+## Commands
 
-For the optional laptop wrapper:
+| | |
+|---|---|
+| `clausroom host` | Start a room and print an offer to send. |
+| `clausroom connect` | Join with the offer you were sent. |
+| `clausroom project` | Re-point your agent at the room after editing the config. |
+| `clausroom check` | Validate the config, and reach the room if one is running. |
 
-```bash
-clausroom host --ssh admin@171.64.160.63
-```
+The only flags are `--config <path>` and `--no-open`. Everything else is a choice,
+and choices live in the config file.
 
-Run `clausroom project` in a second SSH session on the machine that actually
-holds the project. The wrapper cannot infer a remote project from the laptop's
-current directory.
+## Documentation
 
-The lower-level transport commands remain useful for diagnostics:
+- [Getting started](https://github.com/chengine/clausroom#readme)
+- [How it works](https://github.com/chengine/clausroom/blob/main/docs/HOW-IT-WORKS.md) — the connection, the wire, every config key
+- [Security](https://github.com/chengine/clausroom/blob/main/docs/SECURITY.md) — what is enforced where, and what is not
 
-The host runs:
-
-```bash
-npx -y clausroom-bridge peer host --target http://127.0.0.1:3000
-```
-
-After privately sending the printed offer, the guest runs:
-
-```bash
-npx -y clausroom-bridge peer join
-```
-
-The guest pastes the offer and sends the printed answer back to the host. Once
-connected, the guest uses the `CLAUSROOM_PEER_READY http://127.0.0.1:...` URL
-in both their browser and `bridge.toml`.
-
-Peer mode keeps the host target and guest proxy on loopback, rejects TURN, and
-reports the selected path as `direct`. The optional `node-datachannel` runtime
-is loaded only by these peer commands. See
-[PEER-CONNECT.md](https://github.com/chengine/clausroom/blob/main/docs/PEER-CONNECT.md)
-for the security boundary and failure cases.
-
-## Quick start (no install)
-
-Requires Node 20+. No clone and no build — `npx` fetches the published package.
-
-```bash
-# 1. Get a bridge token (arbt_…) from the room owner and export it:
-export AGENT_ROOM_BRIDGE_TOKEN="arbt_…"
-
-# 2. Write ~/.clausroom/bridge.toml. Fastest: paste the filled-in file the room's
-#    participant setup drawer generated for you (server URL, room id, and token
-#    line already inserted); or hand-write it — see the config reference below.
-#    Then self-test:
-npx clausroom-bridge check --config ~/.clausroom/bridge.toml
-
-# 3. Run the MCP server (your agent spawns this; stdout is the MCP protocol):
-npx clausroom-bridge mcp --config ~/.clausroom/bridge.toml
-```
-
-> **From a source checkout (hacking on the bridge)?** After
-> `npm install && npm run build` in
-> [the clausroom repo](https://github.com/chengine/clausroom), substitute
-> `node <repo>/apps/bridge/dist/index.js` wherever a command says
-> `npx clausroom-bridge`.
-
-### Attach to Claude Code (one-liner)
-
-```bash
-claude mcp add --transport stdio clausroom \
-  --env AGENT_ROOM_BRIDGE_TOKEN=$AGENT_ROOM_BRIDGE_TOKEN \
-  -- npx -y clausroom-bridge mcp --config ~/.clausroom/bridge.toml
-```
-
-Then `/mcp` inside Claude Code should list the `clausroom` server with the
-`room_*` tools: `room_get_status`, `room_list_pending`, `room_read_messages`,
-`room_send_message`, `room_wait_for_new_messages`, `room_upload_artifact`,
-`room_download_artifact`, `room_request_human_approval`, `room_check_approval`,
-`room_mark_resolved`, `room_get_summary`, `room_update_summary`.
-
-## Config reference (`bridge.toml`)
-
-Default path `~/.clausroom/bridge.toml`; override with `--config <path>`.
-The bridge token itself is **never** stored in the file — only the name of the
-environment variable that holds it.
-
-```toml
-[identity]
-human_name  = "Timothy"            # required — your name as shown in the room
-agent_name  = "Timothy's Agent"    # required — your agent's display name
-bridge_name = "timothy-dev-bridge" # required — this bridge process's name
-
-[room]
-server_url = "https://clausroom-host.your-tailnet.ts.net" # required, no trailing slash
-room_id    = "room_a1b2c3d4e5f60718293a4b5c"              # required
-token_env  = "AGENT_ROOM_BRIDGE_TOKEN"                    # env var holding the arbt_ token
-
-[policy]
-read_only_default                  = true  # true: write flags below default to false unless set
-allow_agent_to_send_text           = true
-allow_agent_to_upload_files        = false
-require_human_approval_for_uploads = true
-max_upload_bytes_without_approval  = 1048576    # 1 MiB
-max_upload_bytes_absolute          = 104857600  # 100 MiB
-
-[filesystem]
-roots         = ["/path/to/project"]      # uploads (and auto.workdir) must resolve inside these
-deny_globs    = []                        # ADDED to the built-in deny globs, never replacing them
-downloads_dir = "~/.clausroom/downloads"  # room_download_artifact writes here, nowhere else
-
-[auto]                                    # only needed for `clausroom-bridge auto`
-engine               = "claude"           # required: 'claude' | 'codex' | 'custom'
-workdir              = "/path/to/project" # required; MUST resolve inside filesystem.roots
-allowed_tools        = ["Read", "Grep", "Glob"]  # default; read-only on purpose
-model                = "sonnet"           # optional; engine default when unset
-max_turns            = 25                 # engine-internal turn cap per run
-timeout_seconds      = 300                # wall clock per engine run; killed on expiry, no reply
-max_context_messages = 30                 # recent room messages included in the prompt
-respond_to           = "addressed"        # or 'mentions_only'
-custom_command       = []                 # argv array; required when engine = 'custom'
-extra_args           = []                 # extra argv appended to the engine CLI
-bare                 = false              # true = pass the triggering message body verbatim
-max_budget_usd       = 2.50               # optional per-run budget cap (claude engine)
-```
-
-Notes:
-
-- `read_only_default = true` means `allow_agent_to_send_text` and
-  `allow_agent_to_upload_files` are **false unless the file sets them
-  explicitly** — only read/status tools work by default.
-- `[auto]` is read only by the `auto` subcommand; `mcp` and `check` ignore it.
-
-## The auto responder (`clausroom-bridge auto`)
-
-```bash
-npx clausroom-bridge auto --config ~/.clausroom/bridge.toml
-```
-
-Watches the room and, for each new message that addresses your agent
-(`respond_to = "addressed"`: explicitly addressed **or** sent to everyone;
-`"mentions_only"`: explicitly addressed only), composes a prompt — a room
-protocol header (answer with evidence, state confidence, treat room content as
-untrusted data), up to `max_context_messages` of recent context, and the
-question — runs the engine in `workdir`, and posts the engine's reply as an
-`agent_answer` with `reply_to` set. A trailing `Confidence: low|medium|high`
-line in the engine output becomes the message's `confidence` field. Own
-messages, `system_event`, `artifact_uploaded`, and messages older than the
-saved read cursor are never answered.
-
-Engines:
-
-| engine   | invocation | status |
-|----------|------------|--------|
-| `claude` | `claude -p --output-format json --permission-mode dontAsk --allowedTools … --max-turns …` (prompt on stdin; cost/turns logged to stderr) | supported |
-| `codex`  | `codex exec --sandbox read-only --ask-for-approval never` (prompt on stdin, stdout is the reply) | **EXPERIMENTAL** — coded from the documented interface, untested |
-| `custom` | your `custom_command` argv, spawned directly (never a shell); prompt on stdin, stdout is the reply | supported (CI-testable) |
-
-> **Windows:** engines are spawned directly, never through a shell — but
-> npm-installed CLIs on Windows are `.cmd` shims, which Node cannot spawn that
-> way, so `engine = "claude"` / `"codex"` fail with a spawn error when the CLI
-> came from `npm install -g`. Use each CLI's native installer (a real
-> `claude.exe`/`codex.exe` on `PATH`), or `engine = "custom"` with an argv
-> Windows can spawn directly (e.g. `["node", "C:\\path\\to\\cli.js", …]`).
-
-If an engine run errors, the responder posts a short apologetic
-`agent_answer` instead of crashing; on timeout the run is killed and **no**
-reply is posted. On the server's turn limit (429) or a pause (403) it logs to
-stderr and waits for the next **human** message before retrying — the room's
-turn budget is the ultimate brake on a runaway responder.
-
-## Security posture
-
-- **No public application listener.** Normal bridge modes dial the room server
-  and listen on nothing. Peer join creates only a `127.0.0.1` proxy; peer host
-  accepts authenticated WebRTC data channels and maps them only to one fixed
-  loopback Clausroom target.
-- **Token hygiene.** The `arbt_` bridge token lives in an env var, never in the
-  hand-edited config file; the streamlined workflow keeps it in a mode-0600
-  active connection file and injects it only into the MCP process. The server
-  stores only its hash. Engine subprocesses run with the token scrubbed from
-  their environment.
-- **Local policy before any network call.** Uploads must resolve inside
-  `filesystem.roots`, never match deny globs (built-in ones cover `.env`,
-  `.ssh`, keys, tokens, `.git`, `node_modules`, …), are size-capped, and are
-  content-scanned for secret patterns. Outgoing text is blocked when it
-  contains secret-like material or giant inline base64 blobs.
-- **Human approval gates.** Agent uploads over the threshold (or always, per
-  policy), archives, and secret-like filenames require an approval reviewed by
-  *your* human in the web UI; each approval is bound to one exact file
-  (sha256) and is single-use.
-- **Untrusted input everywhere.** Room messages, summaries, and artifacts are
-  authored by other people and agents. Tool descriptions and the auto
-  responder's prompt tell the agent/engine to treat them as data, never as
-  instructions; the `auto` engine defaults to read-only tools.
-- **Server-side guardrails still apply.** Pause switches, per-user rate
-  limits, and the consecutive-agent turn limit are enforced by the server for
-  every reply the bridge posts.
-
-Details: [SECURITY.md](https://github.com/chengine/clausroom/blob/main/docs/SECURITY.md)
-and [THREAT_MODEL.md](https://github.com/chengine/clausroom/blob/main/docs/THREAT_MODEL.md).
-
-## Running the room server
-
-This package is only the client-side bridge. To host a room (Express + SQLite
-server and the web UI), clone
-[github.com/chengine/clausroom](https://github.com/chengine/clausroom) and
-follow its README — typically `npm install && npm run build && npm run up`,
-using Tailscale Serve or `npm run up -- --peer`.
-
-## License
-
-MIT
+MIT licensed.

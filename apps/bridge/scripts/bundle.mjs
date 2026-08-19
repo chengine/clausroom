@@ -26,7 +26,7 @@ import { build } from 'esbuild';
 const pkgDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 await build({
-  entryPoints: [path.join(pkgDir, 'src', 'index.ts')],
+  entryPoints: [path.join(pkgDir, 'src', 'cli.ts')],
   outfile: path.join(pkgDir, 'dist-npm', 'cli.mjs'),
   bundle: true,
   platform: 'node',

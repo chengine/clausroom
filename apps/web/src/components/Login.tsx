@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react';
-import { TOKEN_PREFIXES, type User } from '@clausroom/protocol';
+import { TOKEN_PREFIX, type User } from '@clausroom/protocol';
 import * as api from '../api.js';
 import { effectiveOrigin, setServerBase, setSessionToken } from '../storage.js';
 import { ThemeToggle } from './ThemeToggle.js';
@@ -33,17 +33,17 @@ export function Login({ onLoggedIn, notice }: LoginProps) {
     try {
       setServerBase(serverInput);
 
-      if (token.startsWith(TOKEN_PREFIXES.invite)) {
+      if (token.startsWith(TOKEN_PREFIX.invite)) {
         // One-time invite: exchange it for a session token.
         const result = await api.login(token);
         setSessionToken(result.session_token);
         onLoggedIn(result.session_token, result.user);
-      } else if (token.startsWith(TOKEN_PREFIXES.session)) {
+      } else if (token.startsWith(TOKEN_PREFIX.session)) {
         // Already a session token: validate it against /api/me.
         const result = await api.me(token);
         setSessionToken(token);
         onLoggedIn(token, result.user);
-      } else if (token.startsWith(TOKEN_PREFIXES.bridge)) {
+      } else if (token.startsWith(TOKEN_PREFIX.bridge)) {
         setError(
           'That is a bridge token (arbt_) meant for a coding agent, not the web UI. Paste your invite (arit_) or session (arst_) token instead.',
         );
@@ -53,7 +53,7 @@ export function Login({ onLoggedIn, notice }: LoginProps) {
     } catch (err) {
       if (err instanceof api.ApiClientError && err.status === 401) {
         setError(
-          token.startsWith(TOKEN_PREFIXES.invite)
+          token.startsWith(TOKEN_PREFIX.invite)
             ? 'That invite token was not accepted — it may have already been used or been revoked. Ask the room owner for a fresh one.'
             : 'That session token was not accepted — it may have been revoked. Ask the room owner to regenerate your invite.',
         );

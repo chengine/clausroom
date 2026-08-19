@@ -1,8 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { DEFAULTS, type Approval, type Message, type User } from '@clausroom/protocol';
+import { LIMITS, type Approval, type Message, type User } from '@clausroom/protocol';
 import { errorText } from '../api.js';
 import { buildColorMap, colorFor } from '../colors.js';
-import { effectiveOrigin } from '../storage.js';
 import { CONTINUE_MESSAGE_BODY, agentTurnRun, useRoomState } from '../useRoomState.js';
 import type { ConnectionState } from '../ws.js';
 import { ApprovalCard } from './ApprovalCard.js';
@@ -104,14 +103,13 @@ export function RoomView({ token, roomId, me, onBack, onUnauthorized }: RoomView
   const canSend = myParticipant?.can_send ?? false;
   const iAmOwner = state.myRole === 'owner';
   const iAmHuman = me.kind === 'human' && state.myRole !== 'observer';
-  const serverUrl = state.publicBaseUrl ?? effectiveOrigin();
 
   const workingSet = useMemo(() => new Set(state.workingUserIds), [state.workingUserIds]);
 
   // Decision cards: card message id -> the choice a human answered with.
   // A card counts as answered once any human message at/after it in the room
   // order (button click or typed) has a body exactly equal to one of its
-  // choices (docs/API-CONTRACT.md §4); the earliest such message wins.
+  // choices; the earliest such message wins.
   const answeredChoices = useMemo(() => {
     const map = new Map<string, string>();
     const openCards: Message[] = [];
@@ -377,7 +375,7 @@ export function RoomView({ token, roomId, me, onBack, onUnauthorized }: RoomView
           colorOf={colorOf}
           nameOf={nameOf}
           turnRun={turnRun}
-          maxTurns={state.maxAutoTurns ?? DEFAULTS.MAX_AUTO_TURNS}
+          maxTurns={state.agentTurns ?? LIMITS.AGENT_TURNS}
           approvals={state.approvals}
           onUpdateSummary={actions.updateSummary}
           onContinue={() => actions.sendMessage(CONTINUE_MESSAGE_BODY, [])}
@@ -390,12 +388,8 @@ export function RoomView({ token, roomId, me, onBack, onUnauthorized }: RoomView
       <OwnerDrawer
         open={drawerOpen}
         onClose={() => setDrawerOpen(false)}
-        roomId={roomId}
-        roomName={state.room?.name ?? roomId}
-        serverUrl={serverUrl}
         participants={state.participants}
         meId={me.id}
-        nameOf={nameOf}
         onAddParticipant={actions.addParticipant}
         onRotateToken={actions.rotateToken}
       />
