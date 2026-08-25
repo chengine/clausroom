@@ -2,29 +2,45 @@
  * `clausroom host` and `clausroom connect` — the two commands that start a room.
  *
  * Host: start the server on loopback, create the room and its four
- * participants, wire up the local agent, then offer a direct connection and wait
- * for the answer. Everything the guest needs travels inside that offer.
+ * participants, wire up the local agent, then hand WebRTC to the browser.
  *
- * Connect: take the offer, answer it, and the room appears on a loopback URL.
+ * Connect: serve a loopback switchboard; its browser answers the host invite.
  *
  * Both stay in the foreground for the life of the session and clean up after
  * themselves: the agent registration, the session file, and any child process.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
+import { PEER, type PeerBootstrap, type PeerRoomInvite } from '@clausroom/protocol';
 import { AUTO_READY } from './auto.js';
 import { loadConfig, type Config } from './config.js';
-import { peerHost, peerJoin, type RoomInvite } from './peer.js';
+import { startGuestRelay, type GuestRelay } from './peer.js';
 import { clearSession, readSession, writeSession, type Session } from './session.js';
-import { forwardSignals, log, message as errorText, openBrowser, run } from './util.js';
+import { formatSshAddCommand } from './ssh.js';
+import {
+  detectSshSession,
+  forwardSignals,
+  log,
+  message as errorText,
+  openBrowser,
+  run,
+} from './util.js';
 
 export interface LaunchOptions {
   config?: string;
   open?: boolean;
+  agent?: 'claude' | 'codex' | 'none';
+  auto?: boolean;
+}
+
+function launchConfig(options: LaunchOptions): Config {
+  return loadConfig(options.config, { agent: options.agent, auto: options.auto });
 }
 
 // ---------------------------------------------------------------------------
@@ -40,12 +56,13 @@ const ParticipantReply = z.object({
 });
 
 /**
- * Where the server lives. Next to this package in a checkout; otherwise the
- * operator has to say, because a global install is a copy with no repo around it.
+ * The published CLI carries its server. A checkout build may use the adjacent
+ * server dist instead, with CLAUSROOM_REPO retained as an explicit dev fallback.
  */
 function serverEntry(): string {
   const here = path.dirname(fileURLToPath(import.meta.url));
   const candidates = [
+    path.join(here, 'server.mjs'),
     path.resolve(here, '..', '..', 'server', 'dist', 'index.js'),
     ...(process.env.CLAUSROOM_REPO
       ? [path.resolve(process.env.CLAUSROOM_REPO, 'apps', 'server', 'dist', 'index.js')]
@@ -54,14 +71,13 @@ function serverEntry(): string {
   const found = candidates.find((candidate) => fs.existsSync(candidate));
   if (found) return found;
   throw new Error(
-    'Cannot find the built room server. Run `npm run build` in the clausroom checkout, ' +
-      'and set CLAUSROOM_REPO=/path/to/clausroom if you launch from elsewhere.',
+    'Cannot find the bundled room server. Reinstall Clausroom, or run `npm run build` ' +
+      'in its checkout.',
   );
 }
 
 interface StartedServer {
   child: ChildProcess;
-  port: number;
   url: string;
   invite: string;
 }
@@ -70,7 +86,7 @@ interface StartedServer {
  * Start the server and wait for the two lines it prints on the way up. Its own
  * logs are relayed to stderr so a failure is visible rather than swallowed.
  */
-function startServer(config: Config): Promise<StartedServer> {
+function startServer(config: Config, peerSecret: string): Promise<StartedServer> {
   const child = spawn(
     process.execPath,
     [
@@ -81,6 +97,8 @@ function startServer(config: Config): Promise<StartedServer> {
       config.server.data,
       '--owner',
       config.me.name,
+      '--peer-secret',
+      peerSecret,
     ],
     { stdio: ['ignore', 'pipe', 'inherit'] },
   );
@@ -88,13 +106,21 @@ function startServer(config: Config): Promise<StartedServer> {
 
   return new Promise((resolve, reject) => {
     let invite: string | null = null;
+    let settled = false;
     const lines = readline.createInterface({ input: child.stdout as NodeJS.ReadableStream });
-    const timer = setTimeout(() => {
-      reject(new Error('the room server did not start within 20 seconds'));
-    }, 20_000);
+    const timer = setTimeout(
+      () => done(new Error('the room server did not start within 20 seconds')),
+      20_000,
+    );
     const done = (err: Error | null, started?: StartedServer): void => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
-      if (err) reject(err);
+      if (err) {
+        lines.close();
+        if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+        reject(err);
+      }
       else if (started) resolve(started);
     };
 
@@ -106,7 +132,7 @@ function startServer(config: Config): Promise<StartedServer> {
       } else if (portMatch?.[1]) {
         if (!invite) return done(new Error('the room server printed no invite'));
         const port = Number(portMatch[1]);
-        done(null, { child, port, url: `http://127.0.0.1:${port}`, invite });
+        done(null, { child, url: `http://127.0.0.1:${port}`, invite });
       } else {
         log(`[server] ${line}`);
       }
@@ -190,7 +216,7 @@ async function attachAgent(config: Config): Promise<void> {
       { cwd },
     );
   }
-  log(`[clausroom] ${config.me.agent} can now use the room tools, limited to ${cwd}.`);
+  log(`[clausroom] ${config.me.agent} is attached; room file transfers are limited to ${cwd}.`);
 }
 
 interface AutoChild {
@@ -201,9 +227,13 @@ interface AutoChild {
 /** Start the auto-responder and wait until it is actually watching the room. */
 async function startAuto(config: Config): Promise<AutoChild> {
   const [node, entry] = selfCommand();
-  const child = spawn(node as string, [entry as string, 'auto', '--config', config.file], {
-    stdio: ['ignore', 'pipe', 'inherit'],
-  });
+  const child = spawn(
+    node as string,
+    [entry as string, 'auto', '--config', config.file, '--agent', config.me.agent],
+    {
+      stdio: ['ignore', 'pipe', 'inherit'],
+    },
+  );
   const detach = forwardSignals(child);
   const lines = readline.createInterface({ input: child.stdout as NodeJS.ReadableStream });
   try {
@@ -248,14 +278,46 @@ async function stopChild(managed: AutoChild | ChildProcess | undefined): Promise
   if (!exited) child.kill('SIGKILL');
 }
 
+function bootstrap(value: PeerBootstrap): string {
+  return Buffer.from(JSON.stringify(value), 'utf8').toString('base64url');
+}
+
 /** Show the private browser URL, and open it unless asked not to. */
-async function showBrowser(serverUrl: string, sessionToken: string, open: boolean): Promise<void> {
-  // The token rides in the fragment, so it is never sent to the server as part
-  // of a request; the page stores it and strips the fragment immediately.
-  const url = `${serverUrl}/#clausroom-session=${encodeURIComponent(sessionToken)}`;
-  if (open && (await openBrowser(url))) {
-    log(`[clausroom] opened ${serverUrl} in your browser.`);
+async function showBrowser(
+  serverUrl: string,
+  peer: PeerBootstrap,
+  open: boolean,
+  sessionToken?: string,
+): Promise<void> {
+  // Credentials ride in the fragment, so they are not part of an HTTP request.
+  const params = new URLSearchParams({ 'clausroom-peer': bootstrap(peer) });
+  if (sessionToken) params.set('clausroom-session', sessionToken);
+  const url = `${serverUrl}/#${params}`;
+  const ssh = detectSshSession();
+  if (!ssh && open && (await openBrowser(url))) {
+    log('[clausroom] opened the private room in your browser.');
     return;
+  }
+  if (ssh) {
+    log('[clausroom] SSH detected: open the room on the computer in front of you.');
+    if (ssh.serverAddress && ssh.serverPort) {
+      const rawName = os.hostname().split('.')[0]?.toLowerCase() ?? 'machine';
+      const name = /^[a-z0-9][a-z0-9._-]{0,62}$/.test(rawName) ? rawName : 'machine';
+      const parsedUrl = new URL(serverUrl);
+      const port = Number(parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80));
+      const command = formatSshAddCommand({
+        name,
+        host: ssh.serverAddress,
+        user: os.userInfo().username,
+        sshPort: ssh.serverPort,
+        clausroomPort: port,
+      });
+      log('[clausroom] if this URL is not forwarded, run this once on that computer:');
+      log(`  ${command}`);
+      log(`[clausroom] then, without stopping Clausroom, start the forward: ssh -N clausroom-${name}`);
+    } else {
+      log('[clausroom] this SSH session did not expose enough information to print an exact forward command.');
+    }
   }
   log(`[clausroom] open this private URL (do not share it): ${url}`);
 }
@@ -264,19 +326,45 @@ async function showBrowser(serverUrl: string, sessionToken: string, open: boolea
 async function begin(
   config: Config,
   session: Session,
-  open: boolean,
-  sessionToken: string,
 ): Promise<{ finish: () => Promise<void> }> {
-  await writeSession(session);
-  await attachAgent(config);
-  const auto = config.agent.auto_reply ? await startAuto(config) : undefined;
-  await showBrowser(session.server, sessionToken, open);
-  return {
-    finish: async () => {
-      await stopChild(auto);
-      await clearSession();
-    },
-  };
+  let auto: AutoChild | undefined;
+  try {
+    await writeSession(session);
+    await attachAgent(config);
+    auto = config.agent.auto_reply ? await startAuto(config) : undefined;
+    return {
+      finish: async () => {
+        await stopChild(auto);
+        await clearSession();
+      },
+    };
+  } catch (err) {
+    await stopChild(auto);
+    await clearSession();
+    throw err;
+  }
+}
+
+function waitForSignal(): Promise<void> {
+  return new Promise((resolve) => {
+    const done = (): void => {
+      process.removeListener('SIGINT', done);
+      process.removeListener('SIGTERM', done);
+      resolve();
+    };
+    process.once('SIGINT', done);
+    process.once('SIGTERM', done);
+  });
+}
+
+function waitForChild(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    child.once('exit', (code, signal) => {
+      if (code === 0 || signal === 'SIGINT' || signal === 'SIGTERM') resolve();
+      else reject(new Error(`the room server exited with code ${code}`));
+    });
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -284,8 +372,9 @@ async function begin(
 // ---------------------------------------------------------------------------
 
 export async function runHost(options: LaunchOptions): Promise<void> {
-  const config = loadConfig(options.config);
-  const server = await startServer(config);
+  const config = launchConfig(options);
+  const peerSecret = randomBytes(32).toString('hex');
+  const server = await startServer(config, peerSecret);
   const detachServer = forwardSignals(server.child);
   let finish: (() => Promise<void>) | undefined;
 
@@ -310,38 +399,43 @@ export async function runHost(options: LaunchOptions): Promise<void> {
       throw new Error('the room server did not return the expected participant tokens');
     }
 
-    log(`[clausroom] room "${config.room.name}" is up at ${server.url}`);
-    ({ finish } = await begin(
-      config,
-      {
-        pid: process.pid,
-        role: 'host',
-        server: server.url,
-        room: room.id,
-        token: myAgent.bridge_token,
-        me: config.me.name,
-        agent_name: `${config.me.name}'s agent`,
-        cursor: null,
-      },
-      options.open !== false,
-      token,
-    ));
-
-    // Everything the guest needs is inside the offer: no second message, no
-    // config to hand-edit, no token to paste anywhere.
-    const invite: RoomInvite = {
+    log(`[clausroom] room "${config.room.name}" is ready.`);
+    ({ finish } = await begin(config, {
+      pid: process.pid,
+      role: 'host',
+      server: server.url,
       room: room.id,
+      token: myAgent.bridge_token,
+      me: config.me.name,
+      agent_name: `${config.me.name}'s agent`,
+      cursor: null,
+    }));
+
+    // Credentials leave this browser only after the DTLS-authenticated link is
+    // live; the pasted invite code itself contains connection details only.
+    const invite: PeerRoomInvite = {
+      room: room.id,
+      human_id: partner.participant.user_id,
       invite: partner.invite_token,
       token: theirAgent.bridge_token,
       human: config.partner.name,
       agent: `${config.partner.name}'s agent`,
     };
-    log('[clausroom] send the offer line below to your partner over a channel you trust.');
-    await peerHost({ port: server.port, stun: config.peer.stun, invite });
+    await showBrowser(
+      server.url,
+      { v: PEER.VERSION, role: 'host', secret: peerSecret, stun: config.peer.stun, room: invite },
+      options.open !== false,
+      token,
+    );
+    log('[clausroom] the browser creates the private invite; leave this command running.');
+    await waitForChild(server.child);
   } finally {
     detachServer();
-    if (finish) await finish();
-    await stopChild(server.child);
+    try {
+      if (finish) await finish();
+    } finally {
+      await stopChild(server.child);
+    }
   }
 }
 
@@ -350,36 +444,57 @@ export async function runHost(options: LaunchOptions): Promise<void> {
 // ---------------------------------------------------------------------------
 
 export async function runConnect(options: LaunchOptions): Promise<void> {
-  const config = loadConfig(options.config);
+  const config = launchConfig(options);
   let finish: (() => Promise<void>) | undefined;
+  let setup: Promise<void> | undefined;
+  let relay: GuestRelay | undefined;
+  let stopping = false;
   try {
-    await peerJoin({
+    relay = await startGuestRelay({
       port: config.peer.port,
-      stun: config.peer.stun,
-      onReady: async ({ url, invite }) => {
-        const token = await login(url, invite.invite);
-        log(`[clausroom] connected; the room is at ${url}`);
-        // The names come from the offer: the host created these participants, so
-        // their labels are the ones the room actually shows.
-        ({ finish } = await begin(
-          config,
-          {
+      onJoin: async (invite) => {
+        if (!relay) throw new Error('the local browser relay is not ready');
+        const token = await login(relay.url, invite.invite);
+        if (stopping) throw new Error('the connector is stopping');
+        if (!setup) {
+          log('[clausroom] connected to the room.');
+          // The host owns these participant labels; reconnects refresh only the
+          // browser session, never the already-running local agent.
+          setup = begin(config, {
             pid: process.pid,
             role: 'guest',
-            server: url,
+            server: relay.url,
             room: invite.room,
             token: invite.token,
             me: invite.human,
             agent_name: invite.agent,
             cursor: null,
-          },
-          options.open !== false,
-          token,
-        ));
+          }).then((started) => {
+            finish = started.finish;
+          });
+          void setup.catch(() => {
+            setup = undefined;
+          });
+        }
+        await setup;
+        return token;
       },
     });
+    await showBrowser(
+      relay.url,
+      { v: PEER.VERSION, role: 'guest', secret: relay.secret, stun: config.peer.stun },
+      options.open !== false,
+    );
+    log('[clausroom] paste the browser invite there; leave this command running.');
+    await waitForSignal();
   } finally {
-    if (finish) await finish();
+    stopping = true;
+    await setup?.catch(() => undefined);
+    try {
+      if (finish) await finish();
+    } finally {
+      if (relay) await relay.close();
+    }
   }
 }
 
@@ -418,7 +533,7 @@ export async function runCheck(options: LaunchOptions): Promise<number> {
     if (!(await client.healthy())) throw new Error('the server said it is not ok');
     const me = await client.me();
     const info = await client.info();
-    log(`room:    "${info.room.name}" at ${session.server} as ${me.display_name}`);
+    log(`room:    "${info.room.name}" is reachable as ${me.display_name}`);
     log(`others:  ${info.participants.map((p) => p.user.display_name).join(', ')}`);
     log('Everything checks out.');
     return 0;

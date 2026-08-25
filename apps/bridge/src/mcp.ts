@@ -12,10 +12,13 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z, type ZodRawShape } from 'zod';
 import {
   APPROVAL_TYPES,
+  ArtifactUploadApprovalPayloadSchema,
   CONFIDENCE,
   ChoicesSchema,
+  CreateApprovalRequestSchema,
   LIMITS,
   UpdateSummaryRequestSchema,
+  safeFilename,
   type Approval,
   type Message,
 } from '@clausroom/protocol';
@@ -51,10 +54,6 @@ function describe(a: Approval): string {
 }
 
 /** Only the basename, only safe characters — a download cannot escape its directory. */
-function safeName(name: string): string {
-  return path.basename(name).replace(/[^A-Za-z0-9._\- ()]/g, '_').slice(0, 128) || 'file';
-}
-
 /**
  * Register one tool. Every body gets the same treatment: report activity while
  * it runs, and turn a local refusal or a server error into something the agent
@@ -345,7 +344,11 @@ function registerTools(server: McpServer, bridge: Bridge): void {
         'it again with the approval_id once they have said yes.',
       inputSchema: {
         path: z.string().min(1).describe('File path, absolute or relative to the project directory.'),
-        description: z.string().min(1).describe('What this file is and why you are sharing it.'),
+        description: z
+          .string()
+          .min(1)
+          .max(LIMITS.APPROVAL_STRING_CHARS)
+          .describe('What this file is and why you are sharing it.'),
         approval_id: z.string().optional().describe('An approved artifact_upload approval id.'),
       },
     },
@@ -355,7 +358,12 @@ function registerTools(server: McpServer, bridge: Bridge): void {
       if (!approval_id) {
         const approval = await client.requestApproval({
           approval_type: 'artifact_upload',
-          payload: { filename: file.filename, size_bytes: file.sizeBytes, description },
+          payload: {
+            filename: file.filename,
+            size_bytes: file.sizeBytes,
+            sha256: file.sha256,
+            description,
+          },
         });
         return text(
           `Waiting on your human. Approval ${approval.id} asks them to allow sharing ` +
@@ -373,12 +381,28 @@ function registerTools(server: McpServer, bridge: Bridge): void {
       if (approval.approval_type !== 'artifact_upload') {
         return text(`Approval ${approval_id} is a ${approval.approval_type}, not an upload.`, true);
       }
+      const manifest = ArtifactUploadApprovalPayloadSchema.safeParse(approval.payload);
+      if (!manifest.success) {
+        return text(`Approval ${approval_id} has no valid file manifest. Ask again.`, true);
+      }
       if (approval.status !== 'approved') {
         return text(
           `Approval ${approval_id} is ${approval.status}. ` +
             (approval.status === 'pending'
               ? 'Your human has not answered yet; check again shortly.'
               : 'Do not retry — ask them in the room if it is unclear.'),
+        );
+      }
+      if (
+        manifest.data.filename !== file.filename ||
+        manifest.data.size_bytes !== file.sizeBytes ||
+        manifest.data.sha256 !== file.sha256 ||
+        manifest.data.description !== description
+      ) {
+        return text(
+          `Refused by this machine: ${file.filename} no longer matches approval ${approval_id}. ` +
+            'Ask your human to approve the current file and description.',
+          true,
         );
       }
 
@@ -407,10 +431,12 @@ function registerTools(server: McpServer, bridge: Bridge): void {
     async ({ artifact_id, filename }) => {
       const artifact = await client.artifact(artifact_id);
       const dir = downloadsDir();
-      await fsp.mkdir(dir, { recursive: true });
-      const dest = path.join(dir, `${artifact.id}__${safeName(filename ?? artifact.filename)}`);
+      await fsp.mkdir(dir, { recursive: true, mode: 0o700 });
+      await fsp.chmod(dir, 0o700);
+      const dest = path.join(dir, `${artifact.id}__${safeFilename(filename ?? artifact.filename)}`);
       try {
         await client.download(artifact.id, dest);
+        await fsp.chmod(dest, 0o600);
       } catch (err) {
         await fsp.rm(dest, { force: true });
         throw err;
@@ -439,7 +465,16 @@ function registerTools(server: McpServer, bridge: Bridge): void {
       },
     },
     async ({ type, payload }) => {
-      const approval = await client.requestApproval({ approval_type: type, payload });
+      const request = CreateApprovalRequestSchema.safeParse({ approval_type: type, payload });
+      if (!request.success) {
+        return text(
+          `Refused by this machine: invalid approval metadata — ${request.error.issues
+            .map((issue) => issue.message)
+            .join('; ')}`,
+          true,
+        );
+      }
+      const approval = await client.requestApproval(request.data);
       return text(
         `Asked: ${describe(approval)}. Poll room_check_approval and do not act until it is approved.`,
       );

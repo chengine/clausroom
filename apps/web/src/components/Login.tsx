@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from 'react';
 import { TOKEN_PREFIX, type User } from '@clausroom/protocol';
 import * as api from '../api.js';
-import { effectiveOrigin, setServerBase, setSessionToken } from '../storage.js';
+import { setSessionToken } from '../storage.js';
 import { ThemeToggle } from './ThemeToggle.js';
 import { Wordmark } from './Wordmark.js';
 
@@ -13,8 +13,6 @@ interface LoginProps {
 
 export function Login({ onLoggedIn, notice }: LoginProps) {
   const [tokenInput, setTokenInput] = useState('');
-  const [serverInput, setServerInput] = useState(effectiveOrigin());
-  const [showAdvanced, setShowAdvanced] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -31,8 +29,6 @@ export function Login({ onLoggedIn, notice }: LoginProps) {
 
     setBusy(true);
     try {
-      setServerBase(serverInput);
-
       if (token.startsWith(TOKEN_PREFIX.invite)) {
         // One-time invite: exchange it for a session token.
         const result = await api.login(token);
@@ -101,31 +97,6 @@ export function Login({ onLoggedIn, notice }: LoginProps) {
             </span>
           </label>
 
-          {showAdvanced ? (
-            <label className="field">
-              <span className="field__label">Server URL</span>
-              <input
-                className="input input--mono"
-                type="text"
-                spellCheck={false}
-                value={serverInput}
-                onChange={(e) => setServerInput(e.target.value)}
-                placeholder={window.location.origin}
-              />
-              <span className="field__hint">
-                Leave as-is when this page is served by the clausroom server itself.
-              </span>
-            </label>
-          ) : (
-            <button
-              type="button"
-              className="link-btn"
-              onClick={() => setShowAdvanced(true)}
-            >
-              Connecting to a different server?
-            </button>
-          )}
-
           {error && <div className="form-error" role="alert">{error}</div>}
 
           <button className="btn btn--primary btn--lg" type="submit" disabled={busy}>
@@ -138,7 +109,7 @@ export function Login({ onLoggedIn, notice }: LoginProps) {
         </div>
       </div>
       <p className="login-footnote">
-        Traffic stays inside your tailnet. Tokens are stored only in this browser.
+        Room credentials stay in this browser tab.
       </p>
     </div>
   );

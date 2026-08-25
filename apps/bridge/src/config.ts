@@ -1,14 +1,13 @@
 /**
  * clausroom.toml — the whole configuration, in one file.
  *
- * Every value in it is used exactly as written: nothing here silently overrides
- * anything else, and no setting changes meaning depending on whether another
- * one is present. The file holds only choices. Facts discovered when a room
- * starts (its id, its URL, the agent's token) live in the session file instead,
- * so you never have to paste a credential into your config.
+ * This is the durable configuration. The explicit --agent and --auto launch
+ * flags may override those two choices for one run. Facts discovered when a
+ * room starts (its id, its URL, the agent's token) live in the session file
+ * instead, so you never have to paste a credential into your config.
  *
- * Looked for at --config, then ./clausroom.toml, then ~/.clausroom/clausroom.toml.
- * If there is none, one is written with the defaults below and used immediately.
+ * Looked for at --config, otherwise ./clausroom.toml. If there is none, one is
+ * written in the project directory and used immediately.
  */
 import fs from 'node:fs';
 import os from 'node:os';
@@ -52,12 +51,12 @@ const Schema = z.object({
     command: z.array(z.string().min(1)),
   }),
   server: z.object({
-    port: z.number().int().min(0).max(65535),
+    port: z.number().int().min(1).max(65535),
     data: z.string().min(1),
   }),
   peer: z.object({
-    stun: z.array(z.string().min(1)),
-    port: z.number().int().min(0).max(65535),
+    stun: z.array(z.string().min(1)).max(8),
+    port: z.number().int().min(1).max(65535),
   }),
 });
 
@@ -66,13 +65,18 @@ export type Config = z.infer<typeof Schema> & {
   file: string;
 };
 
+export interface ConfigOverrides {
+  agent?: Config['me']['agent'];
+  auto?: boolean;
+}
+
 /**
  * The file written when there is none, and the reference for every key. The
  * project directory defaults to wherever the command was run, which is almost
  * always the project you meant.
  */
 function template(): string {
-  return `# clausroom — the whole configuration. Every value is used exactly as written.
+  return `# clausroom — durable defaults; --agent and --auto may override one run.
 # Room ids, URLs, and tokens are never stored here; they belong to a session.
 
 [me]
@@ -86,9 +90,9 @@ name = "Guest"            # how the other person appears in the room
 name = "clausroom"
 
 [project]
-# The one directory your agent may read from and upload from. A relative path is
-# resolved against this file. Nothing outside it is reachable, and neither is
-# your partner's copy.
+# Clausroom resolves this against the config file, uses it as the agent's working
+# directory, and refuses file transfers from outside it. The selected agent's own
+# filesystem sandbox remains its responsibility.
 dir = ${quote(process.cwd())}
 
 [agent]
@@ -113,7 +117,7 @@ data = "~/.clausroom/data"
 # STUN only discovers a direct path. TURN relays are refused, so if the two
 # networks cannot reach each other the connection fails instead of relaying.
 stun = ["stun:stun.cloudflare.com:3478", "stun:stun.l.google.com:19302"]
-port = 0                  # loopback port for the guest's browser; 0 = any free
+port = 43001              # fixed so one SSH LocalForward keeps working
 `;
 }
 
@@ -121,12 +125,10 @@ function quote(value: string): string {
   return JSON.stringify(value);
 }
 
-/** --config, else ./clausroom.toml, else ~/.clausroom/clausroom.toml. */
+/** --config, otherwise one project-local file in the command's directory. */
 function locate(explicit: string | undefined): string {
   if (explicit) return path.resolve(expandHome(explicit));
-  const local = path.resolve(CONFIG_NAME);
-  if (fs.existsSync(local)) return local;
-  return path.join(os.homedir(), '.clausroom', CONFIG_NAME);
+  return path.resolve(CONFIG_NAME);
 }
 
 /**
@@ -134,7 +136,7 @@ function locate(explicit: string | undefined): string {
  * returned paths are absolute: `project.dir` resolves against the config file's
  * own directory, so moving the file moves the project with it.
  */
-export function loadConfig(explicit?: string): Config {
+export function loadConfig(explicit?: string, overrides: ConfigOverrides = {}): Config {
   const file = locate(explicit);
   if (!fs.existsSync(file)) {
     fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -164,6 +166,8 @@ export function loadConfig(explicit?: string): Config {
   const base = path.dirname(file);
   config.project.dir = path.resolve(base, expandHome(config.project.dir));
   config.server.data = path.resolve(base, expandHome(config.server.data));
+  if (overrides.agent) config.me.agent = overrides.agent;
+  if (overrides.auto) config.agent.auto_reply = true;
 
   if (config.agent.auto_reply && config.me.agent === 'none' && config.agent.command.length === 0) {
     throw new ConfigError(

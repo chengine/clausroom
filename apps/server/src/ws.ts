@@ -6,9 +6,17 @@
  * Close codes: 4001 bad token, 4003 not a participant, 4004 unknown room.
  */
 import type { IncomingMessage, Server as HttpServer } from 'node:http';
+import net from 'node:net';
 import type { Duplex } from 'node:stream';
 import { WebSocketServer, WebSocket } from 'ws';
-import { ClientFrameSchema, LIMITS, type ActivityState, type ServerFrame } from '@clausroom/protocol';
+import {
+  bindNodeTunnel,
+  ClientFrameSchema,
+  LIMITS,
+  PEER,
+  type ActivityState,
+  type ServerFrame,
+} from '@clausroom/protocol';
 import type { Store } from './db.js';
 import { resolveToken } from './room.js';
 
@@ -23,8 +31,18 @@ interface Conn {
 const HEARTBEAT_MS = 30_000;
 
 export class Hub {
-  private readonly wss = new WebSocketServer({ noServer: true });
+  private readonly wss = new WebSocketServer({
+    noServer: true,
+    maxPayload: LIMITS.CLIENT_FRAME_BYTES,
+    perMessageDeflate: false,
+  });
+  private readonly peerWss = new WebSocketServer({
+    noServer: true,
+    maxPayload: PEER.CHUNK_BYTES,
+    perMessageDeflate: false,
+  });
   private readonly conns = new Set<Conn>();
+  private readonly tunnels = new Set<WebSocket>();
   /**
    * An entry exists only while that agent is "working" (idle is the default).
    * Its timer reverts to idle without a refreshing status frame, so a crashed
@@ -33,13 +51,24 @@ export class Hub {
   private readonly working = new Map<string, NodeJS.Timeout>();
   private heartbeat: NodeJS.Timeout | null = null;
 
-  constructor(private readonly store: Store) {}
+  constructor(
+    private readonly store: Store,
+    private readonly peerSecret?: string,
+  ) {}
 
   attach(server: HttpServer): void {
     server.on('upgrade', (req, socket, head) => {
-      const url = new URL(req.url ?? '/', 'http://localhost');
-      if (url.pathname !== '/ws') return socket.destroy();
-      this.upgrade(req, socket, head, url);
+      let url: URL;
+      try {
+        url = new URL(req.url ?? '/', 'http://localhost');
+      } catch {
+        return socket.destroy();
+      }
+      if (url.pathname === '/ws') return this.upgrade(req, socket, head, url);
+      if (url.pathname === `${PEER.PATH}/tunnel`) {
+        return this.peerUpgrade(server, req, socket, head, url);
+      }
+      socket.destroy();
     });
     this.heartbeat = setInterval(() => this.ping(), HEARTBEAT_MS);
     this.heartbeat.unref();
@@ -58,15 +87,63 @@ export class Hub {
     return [...new Set([...this.conns].filter((c) => c.roomId === roomId).map((c) => c.userId))];
   }
 
+  /** Immediately remove sockets authenticated as a user whose tokens changed. */
+  disconnectUser(userId: string): void {
+    for (const conn of [...this.conns]) {
+      if (conn.userId !== userId) continue;
+      this.drop(conn);
+      conn.ws.close(4001, 'token rotated');
+    }
+  }
+
   close(): void {
     if (this.heartbeat) clearInterval(this.heartbeat);
     for (const timer of this.working.values()) clearTimeout(timer);
     for (const conn of this.conns) conn.ws.terminate();
+    for (const ws of this.tunnels) ws.terminate();
     this.conns.clear();
+    this.tunnels.clear();
     this.wss.close();
+    this.peerWss.close();
+  }
+
+  /** One authenticated browser tunnel, hard-wired to this room server. */
+  private peerUpgrade(
+    server: HttpServer,
+    req: IncomingMessage,
+    socket: Duplex,
+    head: Buffer,
+    url: URL,
+  ): void {
+    const address = server.address();
+    const port = address && typeof address === 'object' ? address.port : 0;
+    const host = req.headers.host ?? '';
+    const origin = req.headers.origin ?? '';
+    const expectedHost = port === 80 ? '127.0.0.1' : `127.0.0.1:${port}`;
+    if (
+      !this.peerSecret ||
+      url.searchParams.get('secret') !== this.peerSecret ||
+      host !== expectedHost ||
+      origin !== `http://${host}` ||
+      this.tunnels.size >= PEER.MAX_TUNNELS
+    ) {
+      socket.destroy();
+      return;
+    }
+    this.peerWss.handleUpgrade(req, socket, head, (ws) => {
+      this.tunnels.add(ws);
+      const drop = () => this.tunnels.delete(ws);
+      ws.once('close', drop);
+      ws.once('error', drop);
+      bindNodeTunnel(net.createConnection({ host: '127.0.0.1', port }), ws);
+    });
   }
 
   private upgrade(req: IncomingMessage, socket: Duplex, head: Buffer, url: URL): void {
+    if (this.conns.size >= LIMITS.WS_CONNECTIONS) {
+      socket.destroy();
+      return;
+    }
     this.wss.handleUpgrade(req, socket, head, (ws) => {
       const resolved = resolveToken(this.store, url.searchParams.get('token') ?? '');
       if (!resolved) return ws.close(4001, 'bad or missing token');

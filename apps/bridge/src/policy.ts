@@ -6,10 +6,12 @@
  * Secret-looking *content* is a hard refusal: if a human really means to share
  * it, they can upload it themselves through the browser.
  */
+import { createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { minimatch } from 'minimatch';
-import { DENY_GLOBS, SECRET_PATTERNS } from '@clausroom/protocol';
+import { DENY_GLOBS, SECRET_PATTERNS, safeFilename } from '@clausroom/protocol';
 import type { Config } from './config.js';
 import { expandHome } from './util.js';
 
@@ -31,6 +33,7 @@ export interface UploadTarget {
   filename: string;
   mimeType: string;
   sizeBytes: number;
+  sha256: string;
 }
 
 const MIME: Record<string, string> = {
@@ -112,8 +115,24 @@ export async function checkUpload(config: Config, inputPath: string): Promise<Up
     );
   }
 
-  const filename = path.basename(absPath);
-  return { absPath, filename, mimeType: guessMime(filename), sizeBytes: stat.size };
+  const filename = safeFilename(absPath);
+  const { bytes, sha256 } = await hashFile(absPath, limit);
+  return { absPath, filename, mimeType: guessMime(filename), sizeBytes: bytes, sha256 };
+}
+
+/** Hash the bytes that will be offered; a growing file cannot bypass the size limit. */
+async function hashFile(absPath: string, limit: number): Promise<{ bytes: number; sha256: string }> {
+  const hash = createHash('sha256');
+  let bytes = 0;
+  for await (const chunk of createReadStream(absPath)) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    bytes += buffer.byteLength;
+    if (bytes > limit) {
+      throw new Refused(`The file grew over the ${limit}-byte upload limit while it was read.`);
+    }
+    hash.update(buffer);
+  }
+  return { bytes, sha256: hash.digest('hex') };
 }
 
 /** The first secret pattern found in the head of a text file, or null. */

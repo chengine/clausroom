@@ -1,5 +1,5 @@
 /**
- * ~/.clausroom/session.json — the only runtime state, mode 0600.
+ * ~/.clausroom/session.json — the only runtime state, mode 0600 on POSIX.
  *
  * `host` and `connect` write it when a room comes up and delete it when they
  * exit; `mcp` and `auto` read it to learn where the room is and which token to
@@ -45,6 +45,7 @@ function sessionFile(): string {
 /** Create the file with 0600 from the start, then move it into place. */
 async function writePrivate(file: string, contents: string): Promise<void> {
   await fsp.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+  await fsp.chmod(path.dirname(file), 0o700);
   const temp = `${file}.${process.pid}.${randomBytes(4).toString('hex')}`;
   await fsp.writeFile(temp, contents, { mode: 0o600, flag: 'wx' });
   try {
@@ -72,7 +73,7 @@ export async function readSession(): Promise<Session> {
     throw new Error('No room is running. Start one with `clausroom host` or `clausroom connect`.');
   }
   const stat = await fsp.lstat(file);
-  if (!stat.isFile() || (stat.mode & 0o077) !== 0) {
+  if (!stat.isFile() || (process.platform !== 'win32' && (stat.mode & 0o077) !== 0)) {
     throw new Error(`Refusing ${file}: it must be a regular file with no group or world access.`);
   }
   const parsed = SessionSchema.safeParse(JSON.parse(raw) as unknown);

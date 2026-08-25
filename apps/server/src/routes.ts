@@ -3,6 +3,7 @@
  * exchange and the two participant/token routes.
  */
 import fs from 'node:fs';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Router, type RequestHandler } from 'express';
@@ -10,6 +11,7 @@ import multer from 'multer';
 import { z } from 'zod';
 import {
   AddParticipantRequestSchema,
+  ArtifactUploadApprovalPayloadSchema,
   ApprovalStatusSchema,
   CreateApprovalRequestSchema,
   CreateRoomRequestSchema,
@@ -21,7 +23,9 @@ import {
   UpdateSummaryRequestSchema,
   genId,
   newToken,
+  safeFilename,
   sha256Hex,
+  type Message,
 } from '@clausroom/protocol';
 import { nowIso, type ArtifactFile, type Store } from './db.js';
 import {
@@ -38,7 +42,6 @@ import {
   publish,
   redact,
   roomOf,
-  safeFilename,
   withExpiry,
   wire,
 } from './room.js';
@@ -47,6 +50,12 @@ import type { Hub } from './ws.js';
 const UPLOAD_APPROVAL_NEEDED =
   'An agent upload needs an approved artifact_upload approval from your human. ' +
   'Call room_upload_artifact without approval_id to request one.';
+
+function privateDir(dir: string): void {
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (!fs.lstatSync(dir).isDirectory()) throw new Error(`Refusing non-directory path: ${dir}`);
+  fs.chmodSync(dir, 0o700);
+}
 
 export function routes(store: Store, hub: Hub, dataDir: string): Router {
   const api = Router();
@@ -94,8 +103,8 @@ export function routes(store: Store, hub: Hub, dataDir: string): Router {
     auth(store),
     handler((req, res) => {
       const me = caller(req);
-      if (me.tokenKind !== 'session') {
-        throw fail('forbidden', 'Only a human session token can create a room.');
+      if (me.tokenKind !== 'session' || me.user.id !== store.ownerUser()?.id) {
+        throw fail('forbidden', 'Only the host owner can create a room.');
       }
       const { name } = parse(CreateRoomRequestSchema, req.body);
       const created = store.transaction(() => {
@@ -175,6 +184,7 @@ export function routes(store: Store, hub: Hub, dataDir: string): Router {
         store.revokeTokens(target.user_id);
         store.addToken(kind, sha256Hex(raw), target.user_id, kind === 'bridge' ? r.id : null);
       });
+      hub.disconnectUser(target.user_id);
       res.json({ [`${kind}_token`]: raw });
     }),
   );
@@ -317,11 +327,34 @@ export function routes(store: Store, hub: Hub, dataDir: string): Router {
 
   const artifactDir = path.join(dataDir, 'artifacts');
   const tmpDir = path.join(artifactDir, '.tmp');
-  fs.mkdirSync(tmpDir, { recursive: true });
+  privateDir(artifactDir);
+  // Multipart files are disposable until their database transaction commits.
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+  privateDir(tmpDir);
   const upload = multer({
     storage: multer.diskStorage({ destination: tmpDir }),
-    limits: { fileSize: LIMITS.UPLOAD_BYTES, files: 1 },
+    limits: {
+      fileSize: LIMITS.UPLOAD_BYTES,
+      files: 1,
+      fields: 2,
+      parts: 4,
+      fieldNameSize: 32,
+      fieldSize: LIMITS.BODY_CHARS * 4,
+      headerPairs: 20,
+    },
   });
+  let receiving = 0;
+  const receiveUpload: RequestHandler = (req, res, next) => {
+    if (receiving >= LIMITS.UPLOAD_CONCURRENCY) {
+      next(fail('too_large', 'Too many uploads are already in progress. Try again shortly.'));
+      return;
+    }
+    receiving += 1;
+    upload.single('file')(req, res, (error) => {
+      if (error) receiving -= 1;
+      next(error);
+    });
+  };
 
   const UploadFields = z.object({
     description: z.string().max(LIMITS.BODY_CHARS).optional(),
@@ -331,7 +364,7 @@ export function routes(store: Store, hub: Hub, dataDir: string): Router {
   api.post(
     '/rooms/:id/artifacts',
     room,
-    upload.single('file'),
+    receiveUpload,
     handler(async (req, res) => {
       const { room: r, participant, me } = roomOf(req);
       const file = req.file;
@@ -348,8 +381,12 @@ export function routes(store: Store, hub: Hub, dataDir: string): Router {
           const approval = fields.approval_id
             ? store.approval(r.id, fields.approval_id)
             : undefined;
+          const manifest = approval
+            ? ArtifactUploadApprovalPayloadSchema.safeParse(approval.payload)
+            : undefined;
           if (
             !approval ||
+            !manifest?.success ||
             withExpiry(store, approval).status !== 'approved' ||
             approval.approval_type !== 'artifact_upload' ||
             approval.requested_by !== me.user.id ||
@@ -357,14 +394,26 @@ export function routes(store: Store, hub: Hub, dataDir: string): Router {
           ) {
             throw fail('approval_required', UPLOAD_APPROVAL_NEEDED);
           }
+          const digest = await fileSha256(file.path);
+          if (
+            manifest.data.filename !== filename ||
+            manifest.data.size_bytes !== file.size ||
+            manifest.data.sha256 !== digest ||
+            manifest.data.description !== (fields.description ?? filename)
+          ) {
+            throw fail(
+              'approval_required',
+              'The uploaded file or description does not match what your human approved. Ask again.',
+            );
+          }
           consume = approval.id;
         }
 
         const id = genId('art');
-        const dir = path.join(artifactDir, r.id, id);
-        fs.mkdirSync(dir, { recursive: true });
+        const roomDir = path.join(artifactDir, r.id);
+        privateDir(roomDir);
+        const dir = path.join(roomDir, id);
         const storagePath = path.join(dir, filename);
-        fs.renameSync(file.path, storagePath);
 
         const artifact: ArtifactFile = {
           id,
@@ -377,24 +426,40 @@ export function routes(store: Store, hub: Hub, dataDir: string): Router {
           approval_id: fields.approval_id ?? null,
           created_at: nowIso(),
         };
-        // The row, its announcement, and the approval consumption commit
-        // together; the broadcast happens only once they have.
-        const message = store.transaction(() => {
-          store.addArtifact(artifact);
-          if (consume) store.consumeApproval(consume);
-          return store.addMessage({
-            room_id: r.id,
-            sender: me.user,
-            message_type: 'artifact_uploaded',
-            body_markdown: redact(fields.description ?? filename),
-            artifact_ids: [id],
+        let message: Message;
+        let madeDir = false;
+        try {
+          // Claim, storage move, rows, and announcement commit as one serialized
+          // operation. A concurrent replay loses the claim before moving bytes.
+          message = store.transaction(() => {
+            if (consume && !store.consumeApproval(consume)) {
+              throw fail('approval_required', 'That approval has already been used. Ask again.');
+            }
+            if (store.artifactBytes(r.id) + file.size > LIMITS.ROOM_ARTIFACT_BYTES) {
+              throw fail('too_large', 'This room has reached its 1 GiB artifact limit.');
+            }
+            fs.mkdirSync(dir, { mode: 0o700 });
+            madeDir = true;
+            fs.renameSync(file.path, storagePath);
+            store.addArtifact(artifact);
+            return store.addMessage({
+              room_id: r.id,
+              sender: me.user,
+              message_type: 'artifact_uploaded',
+              body_markdown: redact(fields.description ?? filename),
+              artifact_ids: [id],
+            });
           });
-        });
+        } catch (error) {
+          if (madeDir) fs.rmSync(dir, { recursive: true, force: true });
+          throw error;
+        }
         publish(hub, message);
         res.status(201).json({ artifact: onWire(artifact), message });
       } finally {
         // Anything that threw before the rename leaves a temp file behind.
         if (file) fs.rmSync(file.path, { force: true });
+        receiving -= 1;
       }
     }),
   );
@@ -561,4 +626,11 @@ function findArtifact(
   const artifact = params.artifactId ? store.artifact(roomId, params.artifactId) : undefined;
   if (!artifact) throw fail('not_found', 'No such artifact in this room.');
   return artifact;
+}
+
+/** Digest the exact temporary bytes multer received, before they enter storage. */
+async function fileSha256(file: string): Promise<string> {
+  const hash = createHash('sha256');
+  for await (const chunk of fs.createReadStream(file)) hash.update(chunk as Buffer);
+  return hash.digest('hex');
 }

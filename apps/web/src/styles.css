@@ -660,6 +660,57 @@ select.input {
 }
 
 /* --------------------------------------------------------------------------
+   Browser-to-browser setup
+   -------------------------------------------------------------------------- */
+
+.peer-screen {
+  min-height: 100%;
+  display: grid;
+  place-items: center;
+  padding: var(--s3);
+}
+
+.peer-card {
+  width: min(680px, 100%);
+  padding: var(--s4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+}
+
+.peer-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 22px;
+}
+
+.peer-status {
+  margin: 4px 0 0;
+  color: var(--text-dim);
+}
+
+.peer-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+
+.peer-code {
+  min-height: 108px;
+  resize: vertical;
+  word-break: break-all;
+}
+
+.peer-copy {
+  align-self: flex-start;
+}
+
+.peer-actions {
+  display: flex;
+  gap: var(--s1);
+}
+
+/* --------------------------------------------------------------------------
    Rooms home
    -------------------------------------------------------------------------- */
 

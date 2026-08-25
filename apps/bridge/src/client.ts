@@ -242,7 +242,7 @@ export class RoomClient {
     if (!res.body) throw new ApiError(res.status, 'unknown', 'the download had no body');
     await pipeline(
       Readable.fromWeb(res.body as unknown as WebReadableStream),
-      createWriteStream(destPath),
+      createWriteStream(destPath, { mode: 0o600 }),
     );
   }
 

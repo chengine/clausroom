@@ -4,17 +4,19 @@
  *
  * It starts a real room with `clausroom host`, exercises the HTTP and WebSocket
  * surface as a human, drives the room tools as an agent over stdio MCP, joins
- * from a second process through the real WebRTC tunnel and moves megabytes over
- * it, then watches the auto-responder answer a message. Nothing is mocked and
- * nothing reaches the network: STUN is off, so ICE only finds local candidates.
+ * from a second process through the browser-relay tunnel and moves megabytes
+ * over it, then watches the auto-responder answer a message. A tiny fake browser
+ * pairs the two authenticated local WebSockets that real browser WebRTC joins;
+ * everything on either side of that browser-only hop is real.
  *
  *   npm run build && npm run smoke
  */
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { spawn, spawnSync } from 'node:child_process';
+import { createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
@@ -26,6 +28,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 /** The bundle npm actually ships, so the test covers what users get. */
 const CLI = path.join(ROOT, 'apps', 'bridge', 'dist-npm', 'cli.mjs');
+const PEER_PATH = '/__clausroom_peer';
 
 const TOOLS = [
   'room_check_approval',
@@ -43,6 +46,7 @@ const TOOLS = [
 ];
 
 const BIG = randomBytes(2 * 1024 * 1024);
+const POSIX = process.platform !== 'win32';
 const children = new Set();
 const passed = [];
 
@@ -64,12 +68,38 @@ async function step(name, fn) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** Pick concrete free ports before writing configs, which deliberately reject 0. */
+async function freePorts(count) {
+  const servers = Array.from({ length: count }, () => net.createServer());
+  try {
+    await Promise.all(
+      servers.map(
+        (server) =>
+          new Promise((resolve, reject) => {
+            server.once('error', reject);
+            server.listen(0, '127.0.0.1', resolve);
+          }),
+      ),
+    );
+    return servers.map((server) => server.address().port);
+  } finally {
+    await Promise.all(
+      servers.map(
+        (server) =>
+          new Promise((resolve) => {
+            server.close(resolve);
+          }),
+      ),
+    );
+  }
+}
+
 /** Spawn a clausroom process with its own home, state directory, and config. */
 function launch(args, name, env = {}) {
   const child = spawn(process.execPath, [CLI, ...args], {
     cwd: ROOT,
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env, CLAUSROOM_REPO: ROOT, ...env },
+    env: { ...process.env, ...env },
   });
   children.add(child);
   child.once('exit', () => children.delete(child));
@@ -129,6 +159,22 @@ async function stderrMatch(child, pattern, timeoutMs = 30_000) {
     await sleep(25);
   }
   throw new Error(`timed out waiting for stderr to match ${pattern}`);
+}
+
+/** The CLI's private fragment handoff, parsed as a browser would parse it. */
+async function privateBrowserUrl(child) {
+  const pattern = /open this private URL \(do not share it\): (http:\/\/127\.0\.0\.1:\d+\/#\S+)/;
+  await stderrMatch(child, pattern);
+  const match = pattern.exec(child.err);
+  assert.ok(match?.[1], 'the CLI should print one complete private browser URL');
+  return new URL(match[1]);
+}
+
+function peerBootstrap(url) {
+  const params = new URLSearchParams(url.hash.slice(1));
+  const raw = params.get('clausroom-peer');
+  assert.ok(raw, 'the private URL should carry a peer bootstrap');
+  return JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'));
 }
 
 async function stop(child) {
@@ -218,9 +264,9 @@ class Probe {
     });
   }
 
-  static open(url) {
+  static open(url, options) {
     return new Promise((resolve, reject) => {
-      const ws = new WebSocket(url);
+      const ws = new WebSocket(url, options);
       const probe = new Probe(ws);
       const timer = setTimeout(() => reject(new Error(`WS timeout: ${url}`)), 10_000);
       ws.on('open', () => {
@@ -259,6 +305,27 @@ class Probe {
     });
   }
 
+  waitForClose(label, timeoutMs = 15_000) {
+    return new Promise((resolve, reject) => {
+      const check = () => {
+        if (this.closed !== null) {
+          cleanup();
+          resolve(this.closed);
+        }
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new Error(`timed out waiting for ${label}`));
+      }, timeoutMs);
+      const cleanup = () => {
+        clearTimeout(timer);
+        this.watchers.delete(check);
+      };
+      this.watchers.add(check);
+      check();
+    });
+  }
+
   send(frame) {
     this.ws.send(JSON.stringify(frame));
   }
@@ -272,6 +339,169 @@ class Probe {
   }
 }
 
+/** A rejected WebSocket handshake must never briefly reach OPEN. */
+function rejectedWebSocket(url, origin) {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(url, { origin });
+    let done = false;
+    const finish = (error) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      try {
+        ws.terminate();
+      } catch {
+        /* never opened */
+      }
+      if (error) reject(error);
+      else resolve();
+    };
+    const timer = setTimeout(() => finish(new Error(`rejection timed out: ${url}`)), 10_000);
+    ws.once('open', () => finish(new Error(`unauthorized WebSocket opened: ${url}`)));
+    ws.once('error', () => finish());
+    ws.once('close', () => finish());
+  });
+}
+
+/**
+ * Pair two binary WebSockets exactly where the real browsers put one ordered
+ * RTCDataChannel. Message boundaries and bytes are preserved in both directions.
+ */
+function pairTunnel(guestUrl, guestOrigin, hostUrl, hostOrigin) {
+  const guestSocket = new WebSocket(guestUrl, { origin: guestOrigin });
+  const hostSocket = new WebSocket(hostUrl, { origin: hostOrigin });
+  const queuedForGuest = [];
+  const queuedForHost = [];
+  let guestOpen = false;
+  let hostOpen = false;
+  let closed = false;
+
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    for (const ws of [guestSocket, hostSocket]) {
+      try {
+        ws.close();
+      } catch {
+        /* already closed */
+      }
+    }
+  };
+  const forward = (target, queue, data, binary) => {
+    if (!binary || data.byteLength === 0 || data.byteLength > 16 * 1024) {
+      close();
+      return;
+    }
+    if (target.readyState === WebSocket.OPEN) target.send(data, { binary: true });
+    else queue.push(data);
+  };
+  const flush = (target, queue) => {
+    while (target.readyState === WebSocket.OPEN && queue.length) {
+      target.send(queue.shift(), { binary: true });
+    }
+  };
+
+  guestSocket.on('message', (data, binary) =>
+    forward(hostSocket, queuedForHost, data, binary),
+  );
+  hostSocket.on('message', (data, binary) =>
+    forward(guestSocket, queuedForGuest, data, binary),
+  );
+  guestSocket.once('open', () => {
+    guestOpen = true;
+    flush(guestSocket, queuedForGuest);
+  });
+  hostSocket.once('open', () => {
+    hostOpen = true;
+    flush(hostSocket, queuedForHost);
+  });
+  guestSocket.once('close', close);
+  hostSocket.once('close', close);
+
+  const opened = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('fake-browser tunnel did not open')), 10_000);
+    const check = () => {
+      if (!guestOpen || !hostOpen) return;
+      clearTimeout(timer);
+      resolve();
+    };
+    guestSocket.on('open', check);
+    hostSocket.on('open', check);
+    guestSocket.once('error', reject);
+    hostSocket.once('error', reject);
+  });
+  return { guestSocket, hostSocket, opened, close };
+}
+
+/** The browser-owned control plane, with RTC represented by paired sockets. */
+class FakeBrowserRelay {
+  constructor(hostUrl, hostBootstrap, guestUrl, guestBootstrap) {
+    this.hostUrl = hostUrl;
+    this.hostBootstrap = hostBootstrap;
+    this.guestUrl = guestUrl;
+    this.guestBootstrap = guestBootstrap;
+    this.control = null;
+    this.tunnels = new Set();
+    this.error = null;
+    this.session = null;
+  }
+
+  async start() {
+    const url = new URL(`${PEER_PATH}/control`, this.guestUrl);
+    url.protocol = 'ws:';
+    url.searchParams.set('secret', this.guestBootstrap.secret);
+    this.control = await Probe.open(url, { origin: this.guestUrl.origin });
+    this.control.ws.on('message', (raw) => {
+      let frame;
+      try {
+        frame = JSON.parse(String(raw));
+      } catch {
+        return;
+      }
+      if (frame.type === 'tunnel' && typeof frame.id === 'string') this.openTunnel(frame.id);
+    });
+    return this.join(this.hostBootstrap.room);
+  }
+
+  async join(invite) {
+    const previous = this.session;
+    this.control.send({ type: 'join', invite });
+    const session = await this.control.waitFor(
+      (frame) => frame.type === 'session' && frame.token !== previous,
+      'guest browser session',
+      30_000,
+    );
+    this.session = session.token;
+    return this.session;
+  }
+
+  openTunnel(id) {
+    const guest = new URL(`${PEER_PATH}/tunnel`, this.guestUrl);
+    guest.protocol = 'ws:';
+    guest.searchParams.set('secret', this.guestBootstrap.secret);
+    guest.searchParams.set('id', id);
+    const host = new URL(`${PEER_PATH}/tunnel`, this.hostUrl);
+    host.protocol = 'ws:';
+    host.searchParams.set('secret', this.hostBootstrap.secret);
+    const tunnel = pairTunnel(guest, this.guestUrl.origin, host, this.hostUrl.origin);
+    this.tunnels.add(tunnel);
+    void tunnel.opened.catch((error) => {
+      this.error = error;
+      tunnel.close();
+    });
+  }
+
+  healthy() {
+    if (this.error) throw this.error;
+  }
+
+  close() {
+    this.control?.close();
+    for (const tunnel of this.tunnels) tunnel.close();
+    this.tunnels.clear();
+  }
+}
+
 const toolText = (result) =>
   (result.content ?? []).filter((c) => c.type === 'text').map((c) => c.text).join('\n');
 
@@ -281,7 +511,9 @@ const toolText = (result) =>
 
 const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'clausroom-smoke-'));
 const project = path.join(tmp, 'project');
+const dataDir = path.join(tmp, 'data');
 const engine = path.join(tmp, 'engine.mjs');
+const [serverPort, guestPort] = await freePorts(2);
 await fsp.mkdir(project, { recursive: true });
 
 function configFile(name, body) {
@@ -291,7 +523,7 @@ function configFile(name, body) {
 }
 
 /** A clausroom.toml with the parts this test varies. */
-function toml({ me, partner, agent = 'none', autoReply = false, command = [], uploads = true, port = 0 }) {
+function toml({ me, partner, agent = 'none', autoReply = false, command = [], uploads = true }) {
   return `[me]
 name = ${JSON.stringify(me)}
 agent = ${JSON.stringify(agent)}
@@ -317,12 +549,12 @@ context_messages = 10
 command = [${command.map((c) => JSON.stringify(c)).join(', ')}]
 
 [server]
-port = ${port}
-data = ${JSON.stringify(path.join(tmp, 'data'))}
+port = ${serverPort}
+data = ${JSON.stringify(dataDir)}
 
 [peer]
 stun = []
-port = 0
+port = ${guestPort}
 `;
 }
 
@@ -330,10 +562,42 @@ let host;
 let guest;
 let auto;
 let mcp;
+let browserRelay;
 const probes = [];
 
 try {
   assert.ok(fs.existsSync(CLI), `${CLI} is missing — run npm run build first`);
+
+  await step('SSH browser forwarding is safe and idempotent', async () => {
+    const home = path.join(tmp, 'ssh-home');
+    const sshDir = path.join(home, '.ssh');
+    await fsp.mkdir(sshDir, { recursive: true, mode: 0o700 });
+    await fsp.writeFile(
+      path.join(sshDir, 'config'),
+      '# existing settings\n\nUser fallback\nPort 22\nHost old\n    HostName old.example\n',
+      { mode: 0o640 },
+    );
+    const args = [
+      CLI, 'ssh', 'add', 'code', '--host', '171.64.160.63', '--user', 'admin',
+      '--ssh-port', '22', '--clausroom-port', '3000',
+    ];
+    const run = () => spawnSync(process.execPath, args, { env: { ...process.env, HOME: home } });
+    assert.equal(run().status, 0);
+    const main = await fsp.readFile(path.join(sshDir, 'config'), 'utf8');
+    const managedPath = path.join(sshDir, 'clausroom', 'config');
+    const managed = await fsp.readFile(managedPath, 'utf8');
+    assert.equal(run().status, 0);
+    assert.equal(await fsp.readFile(path.join(sshDir, 'config'), 'utf8'), main);
+    assert.equal(await fsp.readFile(managedPath, 'utf8'), managed);
+    assert.equal(main.split('\n').find((line) => line.trim() && !line.trim().startsWith('#')), 'Include ~/.ssh/clausroom/config');
+    assert.match(managed, /LocalForward 127\.0\.0\.1:3000 127\.0\.0\.1:3000/);
+    assert.ok(managed.endsWith('Host *\n'));
+    if (POSIX) {
+      assert.equal((await fsp.stat(path.join(sshDir, 'config'))).mode & 0o777, 0o640);
+      assert.equal((await fsp.stat(managedPath)).mode & 0o777, 0o600);
+      assert.equal((await fsp.stat(path.dirname(managedPath))).mode & 0o777, 0o700);
+    }
+  });
 
   // --- the host's room ------------------------------------------------------
 
@@ -343,7 +607,8 @@ try {
   let room;
   let human;
   let session;
-  let offer;
+  let hostBrowserUrl;
+  let hostBootstrap;
 
   await step('host starts a room', async () => {
     await fsp.writeFile(path.join(project, 'notes.md'), '# Notes\n\nThe regularizer overflows.\n');
@@ -354,12 +619,15 @@ try {
       HOME: path.join(tmp, 'home-host'),
       CLAUSROOM_STATE_DIR: hostState,
     });
-    offer = await stdoutLine(host, 'CLAUSROOM_PEER_OFFER');
-    assert.match(offer, /^clausroom-offer-v1\./);
-
-    // The private browser URL is the host's own way in, so it carries the token.
-    await stderrMatch(host, /clausroom-session=arst_[0-9a-f]{32}/);
-    human = /clausroom-session=(arst_[0-9a-f]{32})/.exec(host.err)[1];
+    hostBrowserUrl = await privateBrowserUrl(host);
+    hostBootstrap = peerBootstrap(hostBrowserUrl);
+    const hostParams = new URLSearchParams(hostBrowserUrl.hash.slice(1));
+    human = hostParams.get('clausroom-session');
+    assert.match(human, /^arst_[0-9a-f]{32}$/);
+    assert.equal(hostBootstrap.v, 2);
+    assert.equal(hostBootstrap.role, 'host');
+    assert.match(hostBootstrap.secret, /^[0-9a-f]{64}$/);
+    assert.equal(hostBrowserUrl.origin, `http://127.0.0.1:${serverPort}`);
 
     session = JSON.parse(await fsp.readFile(path.join(hostState, 'session.json'), 'utf8'));
     assert.equal(session.role, 'host');
@@ -368,9 +636,26 @@ try {
     assert.equal(session.me, 'Mikel');
     base = session.server;
     room = session.room;
+    assert.equal(hostBootstrap.room.room, room);
 
-    const stat = await fsp.stat(path.join(hostState, 'session.json'));
-    assert.equal(stat.mode & 0o077, 0, 'the session file must not be group or world readable');
+    if (POSIX) {
+      const stat = await fsp.stat(path.join(hostState, 'session.json'));
+      assert.equal(stat.mode & 0o077, 0, 'the session file must not be group or world readable');
+      for (const dir of [
+        hostState,
+        dataDir,
+        path.join(dataDir, 'artifacts'),
+        path.join(dataDir, 'artifacts', '.tmp'),
+      ]) {
+        assert.equal((await fsp.stat(dir)).mode & 0o077, 0, `${dir} must be private`);
+      }
+      for (const file of ['clausroom.sqlite', 'clausroom.sqlite-wal', 'clausroom.sqlite-shm']) {
+        const target = path.join(dataDir, file);
+        if (fs.existsSync(target)) {
+          assert.equal((await fsp.stat(target)).mode & 0o077, 0, `${target} must be private`);
+        }
+      }
+    }
   });
 
   let owner;
@@ -399,6 +684,9 @@ try {
     const page = await api('GET', `${base}/`);
     assert.equal(page.status, 200);
     assert.match(page.text, /<div id="root"|<!doctype html/i);
+    const theme = await api('GET', `${base}/theme-init.js`);
+    assert.equal(theme.status, 200);
+    assert.doesNotMatch(theme.text, /<!doctype html/i);
   });
 
   let humanProbe;
@@ -427,6 +715,13 @@ try {
       .then(() => null)
       .catch(() => 'rejected');
     assert.ok(denied === 'rejected' || true, 'a bad token must not authenticate');
+
+    const oversized = await Probe.open(
+      `${base.replace('http', 'ws')}/ws?room_id=${room}&token=${human}`,
+    );
+    const closed = oversized.waitForClose('oversized room WebSocket rejection');
+    oversized.ws.send('x'.repeat(5000));
+    assert.equal(await closed, 1009);
   });
 
   await step('messages broadcast, and secrets are redacted', async () => {
@@ -670,6 +965,29 @@ try {
     assert.equal(humanArtifact.size_bytes, 10);
     assert.equal(uploaded.message.message_type, 'artifact_uploaded');
     assert.deepEqual(uploaded.message.artifact_ids, [humanArtifact.id]);
+    const stored = path.join(
+      dataDir,
+      'artifacts',
+      room,
+      humanArtifact.id,
+      humanArtifact.filename,
+    );
+    if (POSIX) {
+      assert.equal((await fsp.stat(path.dirname(stored))).mode & 0o077, 0);
+      assert.equal((await fsp.stat(stored)).mode & 0o077, 0);
+    }
+
+    const excessive = multipart('extra.txt', 'x', { one: '1', two: '2', three: '3' });
+    refused(
+      await api('POST', `${base}/api/rooms/${room}/artifacts`, {
+        token: human,
+        body: excessive.body,
+        contentType: excessive.contentType,
+      }),
+      422,
+      'validation',
+      'multipart metadata is bounded',
+    );
 
     const download = await fetch(`${base}/api/rooms/${room}/artifacts/${humanArtifact.id}/download`, {
       headers: { authorization: `Bearer ${human}` },
@@ -691,7 +1009,8 @@ try {
   });
 
   await step('an agent upload needs one approval, good for one upload', async () => {
-    const first = multipart('trace.log', 'trace\n', { description: 'A trace' });
+    const trace = 'trace\n';
+    const first = multipart('trace.log', trace, { description: 'A trace' });
     refused(
       await api('POST', `${base}/api/rooms/${room}/artifacts`, {
         token: session.token,
@@ -703,10 +1022,38 @@ try {
       'agent upload without approval',
     );
 
+    for (const [label, approval_type, payload] of [
+      ['nested secret', 'other', { reason: { detail: 'sk-abcdefghijkl' } }],
+      ['oversized metadata', 'other', { notes: Array(5).fill('x'.repeat(900)) }],
+      [
+        'missing artifact digest',
+        'artifact_upload',
+        { filename: 'trace.log', size_bytes: Buffer.byteLength(trace), description: 'A trace' },
+      ],
+    ]) {
+      refused(
+        await api('POST', `${base}/api/rooms/${room}/approvals`, {
+          token: session.token,
+          json: { approval_type, payload },
+        }),
+        422,
+        'validation',
+        label,
+      );
+    }
+
     const requested = ok(
       await api('POST', `${base}/api/rooms/${room}/approvals`, {
         token: session.token,
-        json: { approval_type: 'artifact_upload', payload: { filename: 'trace.log', size_bytes: 6 } },
+        json: {
+          approval_type: 'artifact_upload',
+          payload: {
+            filename: 'trace.log',
+            size_bytes: Buffer.byteLength(trace),
+            sha256: createHash('sha256').update(trace).digest('hex'),
+            description: 'A trace',
+          },
+        },
       }),
       201,
       'request approval',
@@ -737,7 +1084,22 @@ try {
     assert.equal(answered.approval.status, 'approved');
     await humanProbe.waitFor((f) => f.type === 'approval_resolved', 'approval_resolved');
 
-    const withApproval = multipart('trace.log', 'trace\n', {
+    const wrongBytes = multipart('trace.log', 'traco\n', {
+      description: 'A trace',
+      approval_id: requested.approval.id,
+    });
+    refused(
+      await api('POST', `${base}/api/rooms/${room}/artifacts`, {
+        token: session.token,
+        body: wrongBytes.body,
+        contentType: wrongBytes.contentType,
+      }),
+      403,
+      'approval_required',
+      'same-size altered bytes',
+    );
+
+    const withApproval = multipart('trace.log', trace, {
       description: 'A trace',
       approval_id: requested.approval.id,
     });
@@ -776,6 +1138,49 @@ try {
       409,
       'conflict',
       'already answered',
+    );
+
+    const race = ok(
+      await api('POST', `${base}/api/rooms/${room}/approvals`, {
+        token: session.token,
+        json: {
+          approval_type: 'artifact_upload',
+          payload: {
+            filename: 'race.log',
+            size_bytes: 5,
+            sha256: createHash('sha256').update('race\n').digest('hex'),
+            description: 'Race proof',
+          },
+        },
+      }),
+      201,
+      'request concurrent approval',
+    );
+    ok(
+      await api('POST', `${base}/api/rooms/${room}/approvals/${race.approval.id}/respond`, {
+        token: human,
+        json: { decision: 'approved' },
+      }),
+      200,
+      'approve concurrent upload',
+    );
+    const attempts = await Promise.all(
+      [0, 1].map(() => {
+        const upload = multipart('race.log', 'race\n', {
+          description: 'Race proof',
+          approval_id: race.approval.id,
+        });
+        return api('POST', `${base}/api/rooms/${room}/artifacts`, {
+          token: session.token,
+          body: upload.body,
+          contentType: upload.contentType,
+        });
+      }),
+    );
+    assert.deepEqual(attempts.map((result) => result.status).sort(), [201, 403]);
+    assert.equal(
+      attempts.find((result) => result.status === 403)?.data?.error?.code,
+      'approval_required',
     );
   });
 
@@ -821,6 +1226,21 @@ try {
       'forbidden',
       'an observer cannot add participants',
     );
+    refused(
+      await api('POST', `${base}/api/rooms`, {
+        token: observer.session_token,
+        json: { name: 'not mine' },
+      }),
+      403,
+      'forbidden',
+      'only the host owner creates rooms',
+    );
+
+    const observerProbe = await Probe.open(
+      `${base.replace('http', 'ws')}/ws?room_id=${room}&token=${observer.session_token}`,
+    );
+    await observerProbe.waitFor((frame) => frame.type === 'hello', 'observer hello');
+    const observerClosed = observerProbe.waitForClose('rotated observer socket');
 
     const rotated = ok(
       await api('POST', `${base}/api/rooms/${room}/participants/${added.participant.user_id}/token`, {
@@ -830,6 +1250,7 @@ try {
       'rotate',
     );
     assert.match(rotated.invite_token, /^arit_[0-9a-f]{32}$/);
+    assert.equal(await observerClosed, 4001, 'rotation must disconnect an already-open socket');
     refused(
       await api('GET', `${base}/api/me`, { token: observer.session_token }),
       401,
@@ -1016,40 +1437,92 @@ try {
     mcp = null;
   });
 
-  // --- the guest, over the real tunnel -------------------------------------
+  // --- the guest, across the browser-owned hop -----------------------------
 
-  await step('the guest joins over a direct connection', async () => {
+  let guestBase;
+  let guestHuman;
+  let guestBrowserUrl;
+  let guestBootstrap;
+
+  await step('the guest starts a loopback browser relay', async () => {
     const guestConfig = configFile('guest.toml', toml({ me: 'Ada', partner: 'Mikel' }));
     guest = launch(['connect', '--no-open', '--config', guestConfig], 'guest', {
       HOME: path.join(tmp, 'home-guest'),
       CLAUSROOM_STATE_DIR: path.join(tmp, 'state-guest'),
     });
+    guestBrowserUrl = await privateBrowserUrl(guest);
+    guestBootstrap = peerBootstrap(guestBrowserUrl);
+    guestBase = guestBrowserUrl.origin;
+    assert.equal(guestBase, `http://127.0.0.1:${guestPort}`);
+    assert.equal(guestBootstrap.v, 2);
+    assert.equal(guestBootstrap.role, 'guest');
+    assert.match(guestBootstrap.secret, /^[0-9a-f]{64}$/);
 
-    // A mistyped paste must not tear the room down.
-    guest.stdin.write('not-an-offer\n');
-    await stderrMatch(guest, /still waiting — paste the right offer/);
-    assert.equal(guest.exitCode, null);
-    guest.stdin.write(`${offer}\n`);
-
-    const answer = await stdoutLine(guest, 'CLAUSROOM_PEER_ANSWER');
-    host.stdin.write('not-an-answer\n');
-    await stderrMatch(host, /still waiting — paste the right answer/);
-    assert.equal(host.exitCode, null);
-    host.stdin.write(`${answer}\n`);
-
-    const [hostPath, guestPath] = await Promise.all([
-      stdoutLine(host, 'CLAUSROOM_PEER_PATH'),
-      stdoutLine(guest, 'CLAUSROOM_PEER_PATH'),
-    ]);
-    assert.match(hostPath, /^direct/, 'the host must report a direct path, never a relay');
-    assert.match(guestPath, /^direct/, 'the guest must report a direct path, never a relay');
+    const page = await api('GET', `${guestBase}/`);
+    assert.equal(page.status, 200);
+    assert.match(page.text, /<div id="root"|<!doctype html/i);
+    for (const asset of ['theme-init.js', 'favicon.png', 'claus.png']) {
+      const response = await api('GET', `${guestBase}/${asset}`);
+      assert.equal(response.status, 200, `${asset} should be served locally`);
+      assert.doesNotMatch(response.text, /<!doctype html/i);
+    }
+    assert.equal((await api('GET', `${guestBase}/%00`)).status, 400);
+    assert.equal(guest.exitCode, null, 'a malformed local URL must not stop the connector');
   });
 
-  let guestBase;
+  await step('browser relays reject a bad secret or origin', async () => {
+    const bad = '0'.repeat(64);
+    const hostTunnel = new URL(`${PEER_PATH}/tunnel`, hostBrowserUrl);
+    hostTunnel.protocol = 'ws:';
+    hostTunnel.searchParams.set('secret', bad === hostBootstrap.secret ? '1'.repeat(64) : bad);
+    await rejectedWebSocket(hostTunnel, hostBrowserUrl.origin);
+    hostTunnel.searchParams.set('secret', hostBootstrap.secret);
+    await rejectedWebSocket(hostTunnel, 'http://127.0.0.1:1');
+
+    const guestControl = new URL(`${PEER_PATH}/control`, guestBrowserUrl);
+    guestControl.protocol = 'ws:';
+    guestControl.searchParams.set('secret', bad === guestBootstrap.secret ? '1'.repeat(64) : bad);
+    await rejectedWebSocket(guestControl, guestBrowserUrl.origin);
+    guestControl.searchParams.set('secret', guestBootstrap.secret);
+    await rejectedWebSocket(guestControl, 'http://127.0.0.1:1');
+  });
+
+  await step('the fake browsers join the two authenticated relay ends', async () => {
+    browserRelay = new FakeBrowserRelay(
+      hostBrowserUrl,
+      hostBootstrap,
+      guestBrowserUrl,
+      guestBootstrap,
+    );
+    guestHuman = await browserRelay.start();
+    assert.match(guestHuman, /^arst_[0-9a-f]{32}$/);
+    assert.equal(host.exitCode, null);
+    assert.equal(guest.exitCode, null);
+    browserRelay.healthy();
+  });
+
+  await step('a fresh invite reconnects the browser without restarting its agent', async () => {
+    const sessionFile = path.join(tmp, 'state-guest', 'session.json');
+    const agentSession = await fsp.readFile(sessionFile, 'utf8');
+    const rotated = ok(
+      await api('POST', `${base}/api/rooms/${room}/participants/${partner.user_id}/token`, {
+        token: human,
+      }),
+      200,
+      'rotate guest invite',
+    );
+    const refreshed = await browserRelay.join({
+      ...hostBootstrap.room,
+      invite: rotated.invite_token,
+    });
+    assert.notEqual(refreshed, guestHuman);
+    refused(await api('GET', `${guestBase}/api/me`, { token: guestHuman }), 401, 'unauthorized', 'old browser session');
+    ok(await api('GET', `${guestBase}/api/me`, { token: refreshed }), 200, 'new browser session');
+    assert.equal(await fsp.readFile(sessionFile, 'utf8'), agentSession);
+    guestHuman = refreshed;
+  });
 
   await step('the room works through the tunnel', async () => {
-    guestBase = await stdoutLine(guest, 'CLAUSROOM_PEER_READY');
-    assert.match(guestBase, /^http:\/\/127\.0\.0\.1:\d+$/);
     const guestSession = JSON.parse(
       await fsp.readFile(path.join(tmp, 'state-guest', 'session.json'), 'utf8'),
     );
@@ -1060,9 +1533,6 @@ try {
     assert.notEqual(guestSession.token, session.token, 'each side has its own agent token');
 
     assert.deepEqual(ok(await api('GET', `${guestBase}/healthz`), 200, 'tunnelled healthz'), { ok: true });
-
-    await stderrMatch(guest, /clausroom-session=arst_[0-9a-f]{32}/);
-    const guestHuman = /clausroom-session=(arst_[0-9a-f]{32})/.exec(guest.err)[1];
     const detail = ok(
       await api('GET', `${guestBase}/api/rooms/${room}`, { token: guestHuman }),
       200,
@@ -1084,10 +1554,10 @@ try {
       'tunnelled broadcast',
       20_000,
     );
+    browserRelay.healthy();
   });
 
   await step('megabytes move both ways through the tunnel', async () => {
-    const guestHuman = /clausroom-session=(arst_[0-9a-f]{32})/.exec(guest.err)[1];
     const { body, contentType } = multipart('big.bin', BIG, { description: 'A big blob' });
     const uploaded = ok(
       await api('POST', `${guestBase}/api/rooms/${room}/artifacts`, {
@@ -1105,6 +1575,7 @@ try {
     });
     assert.equal(down.status, 200);
     assert.deepEqual(Buffer.from(await down.arrayBuffer()), BIG, 'the bytes must survive the round trip');
+    browserRelay.healthy();
   });
 
   // --- answering on its own ------------------------------------------------
@@ -1226,6 +1697,8 @@ try {
   });
 
   await step('sessions are cleaned up on exit', async () => {
+    browserRelay?.close();
+    browserRelay = null;
     await stop(guest);
     guest = null;
     await stop(auto);
@@ -1244,10 +1717,31 @@ try {
     );
   });
 
+  await step('old owner sessions stay revoked across host restarts', async () => {
+    host = launch(['host', '--no-open', '--config', hostConfig], 'restart', {
+      HOME: path.join(tmp, 'home-host'),
+      CLAUSROOM_STATE_DIR: hostState,
+    });
+    const restartedUrl = await privateBrowserUrl(host);
+    const freshOwner = new URLSearchParams(restartedUrl.hash.slice(1)).get('clausroom-session');
+    assert.match(freshOwner, /^arst_[0-9a-f]{32}$/);
+    refused(
+      await api('GET', `${base}/api/me`, { token: human }),
+      401,
+      'unauthorized',
+      'old owner session',
+    );
+    ok(await api('GET', `${base}/api/me`, { token: freshOwner }), 200, 'fresh owner session');
+    await stop(host);
+    host = null;
+    assert.equal(fs.existsSync(path.join(hostState, 'session.json')), false);
+  });
+
   process.stderr.write(`\nall ${passed.length} steps passed\n`);
 } finally {
   if (mcp) await mcp.close().catch(() => undefined);
   for (const probe of probes) probe.close();
+  browserRelay?.close();
   await Promise.allSettled([stop(auto), stop(guest), stop(host)]);
   for (const child of children) child.kill('SIGKILL');
   await fsp.rm(tmp, { recursive: true, force: true }).catch(() => undefined);

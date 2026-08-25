@@ -1,11 +1,61 @@
 /**
  * Primitives with no knowledge of clausroom, shared by more than one module.
- * Everything the CLI prints for a human goes to stderr: stdout is reserved for
- * the MCP protocol, the peer offer/answer codes, and readiness lines.
+ * Everything the CLI prints for a human goes to stderr; stdout is reserved for
+ * machine protocols and readiness lines.
  */
 import { spawn, type ChildProcess, type StdioOptions } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
+
+/** What a remote process can actually learn about its enclosing SSH session. */
+export interface SshSession {
+  source: 'connection' | 'client' | 'tty';
+  clientAddress: string | null;
+  serverAddress: string | null;
+  serverPort: number | null;
+}
+
+const sshPort = (raw: string | undefined): number | null => {
+  if (!raw || !/^\d{1,5}$/.test(raw)) return null;
+  const port = Number(raw);
+  return port >= 1 && port <= 65535 ? port : null;
+};
+
+/**
+ * Detect SSH without guessing from DISPLAY or the terminal type. SSH_CONNECTION
+ * is the useful form: client-ip client-port server-ip server-port. The fallbacks
+ * establish only that this is SSH; they cannot recover a destination address.
+ */
+export function detectSshSession(env: NodeJS.ProcessEnv = process.env): SshSession | null {
+  if (env.SSH_CONNECTION) {
+    const [clientAddress, _clientPort, serverAddress, serverPort] = env.SSH_CONNECTION
+      .trim()
+      .split(/\s+/);
+    return {
+      source: 'connection',
+      clientAddress: clientAddress || null,
+      serverAddress: serverAddress || null,
+      serverPort: sshPort(serverPort),
+    };
+  }
+  if (env.SSH_CLIENT) {
+    const [clientAddress, _clientPort, serverPort] = env.SSH_CLIENT.trim().split(/\s+/);
+    return {
+      source: 'client',
+      clientAddress: clientAddress || null,
+      serverAddress: null,
+      serverPort: sshPort(serverPort),
+    };
+  }
+  return env.SSH_TTY
+    ? {
+        source: 'tty',
+        clientAddress: null,
+        serverAddress: null,
+        serverPort: null,
+      }
+    : null;
+}
 
 export function log(line: string): void {
   process.stderr.write(`${line}\n`);
@@ -13,33 +63,6 @@ export function log(line: string): void {
 
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-export interface Deferred<T> {
-  promise: Promise<T>;
-  resolve: (value: T) => void;
-  reject: (reason: Error) => void;
-}
-
-export function deferred<T>(): Deferred<T> {
-  let resolve!: (value: T) => void;
-  let reject!: (reason: Error) => void;
-  const promise = new Promise<T>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  return { promise, resolve, reject };
-}
-
-export function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  const expiry = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms / 1000}s`)), ms);
-    timer.unref();
-  });
-  return Promise.race([promise, expiry]).finally(() => {
-    if (timer) clearTimeout(timer);
-  });
 }
 
 /** Expand a leading `~` to the home directory. */

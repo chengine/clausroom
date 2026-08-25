@@ -22,7 +22,6 @@ import {
   type Room,
   type User,
 } from '@clausroom/protocol';
-import { getServerBase } from './storage.js';
 
 export class ApiClientError extends Error {
   constructor(
@@ -59,7 +58,7 @@ async function call<T>(
 ): Promise<T> {
   let res: Response;
   try {
-    res = await fetch(`${getServerBase()}${path}`, {
+    res = await fetch(path, {
       method: opts.method ?? 'GET',
       headers: {
         ...(opts.token ? { Authorization: `Bearer ${opts.token}` } : {}),
@@ -260,7 +259,7 @@ export function rotateToken(token: string, roomId: string, userId: string): Prom
 async function saveAs(token: string, path: string, filename: string): Promise<void> {
   let res: Response;
   try {
-    res = await fetch(`${getServerBase()}${path}`, {
+    res = await fetch(path, {
       headers: { Authorization: `Bearer ${token}` },
     });
   } catch {

@@ -16,16 +16,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import multer from 'multer';
-import { genId, newToken, sha256Hex } from '@clausroom/protocol';
+import { WEB_CSP, genId, newToken, sha256Hex } from '@clausroom/protocol';
 import { Store } from './db.js';
 import { HttpError, fail } from './room.js';
 import { routes } from './routes.js';
 import { Hub } from './ws.js';
-
-const CSP =
-  "default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data:; " +
-  "style-src 'self' 'unsafe-inline'; script-src 'self'; base-uri 'none'; " +
-  "frame-ancestors 'none'; form-action 'self'";
 
 const NOT_BUILT = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>clausroom</title></head>
@@ -34,23 +29,37 @@ const NOT_BUILT = `<!doctype html>
 and reload.</p></body></html>
 `;
 
-/** `--port`, `--data`, `--owner`, and nothing else. */
-function options(argv: string[]): { port: number; data: string; owner: string } {
+/** The peer secret is an in-memory capability for this process's own browser. */
+function options(argv: string[]): { port: number; data: string; owner: string; peerSecret?: string } {
   let port = 3000;
   let data = './data';
   let owner = 'Host';
+  let peerSecret: string | undefined;
   for (let i = 0; i < argv.length; i += 2) {
     const value = argv[i + 1];
     if (value === undefined) throw new Error(`${argv[i]} needs a value`);
     else if (argv[i] === '--port') port = Number(value);
     else if (argv[i] === '--data') data = value;
     else if (argv[i] === '--owner') owner = value;
-    else throw new Error('usage: clausroom-server [--port <n>] [--data <dir>] [--owner <name>]');
+    else if (argv[i] === '--peer-secret') peerSecret = value;
+    else {
+      throw new Error(
+        'usage: clausroom-server [--port <n>] [--data <dir>] [--owner <name>] [--peer-secret <hex>]',
+      );
+    }
   }
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
     throw new Error(`--port must be an integer from 0 to 65535 (got ${port})`);
   }
-  return { port, data: path.resolve(data.replace(/^~(?=$|\/)/, os.homedir())), owner };
+  if (peerSecret !== undefined && !/^[0-9a-f]{64}$/.test(peerSecret)) {
+    throw new Error('--peer-secret must be 32 bytes of lowercase hex');
+  }
+  return {
+    port,
+    data: path.resolve(data.replace(/^~(?=$|\/)/, os.homedir())),
+    owner,
+    ...(peerSecret ? { peerSecret } : {}),
+  };
 }
 
 /**
@@ -71,6 +80,7 @@ function bootInvite(store: Store, ownerName: string): string {
         kind: 'human',
         owner_user_id: null,
       });
+    if (existing) store.revokeTokens(owner.id);
     if (!existing) {
       store.addUser({
         id: genId('user'),
@@ -88,24 +98,29 @@ function bootInvite(store: Store, ownerName: string): string {
 
 /** The built web UI, next to this package whether running from src or dist. */
 function webDist(): string {
-  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'web', 'dist');
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  return [path.join(here, 'web'), path.resolve(here, '..', '..', 'web', 'dist')].find((candidate) =>
+    fs.existsSync(path.join(candidate, 'index.html')),
+  ) ?? path.join(here, 'web');
 }
 
 function main(): void {
-  const { port, data, owner } = options(process.argv.slice(2));
-  fs.mkdirSync(data, { recursive: true });
+  const { port, data, owner, peerSecret } = options(process.argv.slice(2));
+  if (process.platform !== 'win32') process.umask(0o077);
+  fs.mkdirSync(data, { recursive: true, mode: 0o700 });
+  fs.chmodSync(data, 0o700);
 
   const store = new Store(path.join(data, 'clausroom.sqlite'));
   process.stdout.write(`CLAUSROOM_INVITE ${bootInvite(store, owner)}\n`);
 
-  const hub = new Hub(store);
+  const hub = new Hub(store, peerSecret);
   const app = express();
   app.disable('x-powered-by');
   app.use((_req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('Referrer-Policy', 'no-referrer');
-    res.setHeader('Content-Security-Policy', CSP);
+    res.setHeader('Content-Security-Policy', WEB_CSP);
     next();
   });
 
@@ -152,6 +167,16 @@ function main(): void {
 
   const server = http.createServer(app);
   hub.attach(server);
+  server.once('error', (error: NodeJS.ErrnoException) => {
+    process.stderr.write(
+      error.code === 'EADDRINUSE'
+        ? `[clausroom] server.port ${port} is already in use; choose another in clausroom.toml\n`
+        : `[clausroom] room server failed: ${error.message}\n`,
+    );
+    hub.close();
+    store.close();
+    process.exit(1);
+  });
   server.listen(port, '127.0.0.1', () => {
     const address = server.address();
     process.stdout.write(

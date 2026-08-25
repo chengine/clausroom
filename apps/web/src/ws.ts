@@ -7,7 +7,6 @@
  * frame; the room state layer uses it to catch up missed messages via REST.
  */
 import { ServerFrameSchema, type ServerFrame } from '@clausroom/protocol';
-import { getServerBase } from './storage.js';
 
 export type ConnectionState = 'connecting' | 'online' | 'reconnecting' | 'denied' | 'stopped';
 
@@ -22,8 +21,7 @@ const PING_INTERVAL_MS = 25_000;
 const DENIED_CLOSE_CODES = new Set([4001, 4003, 4004]);
 
 function wsUrl(roomId: string, token: string): string {
-  const httpBase = getServerBase() || window.location.origin;
-  const base = httpBase.replace(/^http/i, 'ws');
+  const base = window.location.origin.replace(/^http/i, 'ws');
   const params = new URLSearchParams({ room_id: roomId, token });
   return `${base}/ws?${params.toString()}`;
 }

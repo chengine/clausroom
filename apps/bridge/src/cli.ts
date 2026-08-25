@@ -2,15 +2,15 @@
 /**
  * clausroom — a private chatroom for two people and their coding agents.
  *
- *   clausroom host      start a room and offer a direct connection
- *   clausroom connect   take an offer and join the room
+ *   clausroom host      start a room for this project
+ *   clausroom connect   join a room from this project
  *   clausroom project   re-point your agent at the running room
  *   clausroom check     validate the config and the running room
  *
  * Every choice lives in clausroom.toml. The only flags are the ones that
  * describe this one invocation, so there is never a question of which wins.
  */
-import { Command } from 'commander';
+import { Command, InvalidArgumentError } from 'commander';
 import { ConfigError } from './config.js';
 import { log, message as errorText } from './util.js';
 
@@ -37,33 +37,62 @@ const program = new Command()
 const configOf = (local: string | undefined): string | undefined =>
   local ?? (program.opts().config as string | undefined);
 
+const port = (value: string): number => {
+  if (!/^\d{1,5}$/.test(value)) throw new InvalidArgumentError('must be an integer from 1 to 65535');
+  const parsed = Number(value);
+  if (parsed < 1 || parsed > 65535) {
+    throw new InvalidArgumentError('must be an integer from 1 to 65535');
+  }
+  return parsed;
+};
+
+const agent = (value: string): 'claude' | 'codex' | 'none' => {
+  if (value === 'claude' || value === 'codex' || value === 'none') return value;
+  throw new InvalidArgumentError('must be claude, codex, or none');
+};
+
+interface StartOptions {
+  config?: string;
+  open?: boolean;
+  agent?: 'claude' | 'codex' | 'none';
+  auto?: boolean;
+}
+
+const startOptions = (opts: StartOptions): StartOptions => {
+  const config = configOf(opts.config);
+  return {
+    ...(config ? { config } : {}),
+    ...(opts.open === false ? { open: false } : {}),
+    ...(opts.agent ? { agent: opts.agent } : {}),
+    ...(opts.auto ? { auto: true } : {}),
+  };
+};
+
 program
   .command('host')
-  .description('Start a room here and print an offer to send to the other person.')
+  .description('Start a room here; the browser displays the private invite.')
   .option('-c, --config <path>', 'clausroom.toml to use')
+  .option('--agent <agent>', 'coding agent: claude, codex, or none', agent)
+  .option('--auto', 'let the selected agent answer addressed messages')
   .option('--no-open', 'do not open the browser')
-  .action(async (opts: { config?: string; open?: boolean }) => {
+  .action(async (opts: StartOptions) => {
     await attempt('host', async () => {
       const { runHost } = await import('./launch.js');
-      await runHost({
-        ...(configOf(opts.config) ? { config: configOf(opts.config) } : {}),
-        ...(opts.open === false ? { open: false } : {}),
-      });
+      await runHost(startOptions(opts));
     });
   });
 
 program
   .command('connect')
-  .description('Join a room using the offer the host sent you.')
+  .description('Open the browser that accepts a host invite and joins the room.')
   .option('-c, --config <path>', 'clausroom.toml to use')
+  .option('--agent <agent>', 'coding agent: claude, codex, or none', agent)
+  .option('--auto', 'let the selected agent answer addressed messages')
   .option('--no-open', 'do not open the browser')
-  .action(async (opts: { config?: string; open?: boolean }) => {
+  .action(async (opts: StartOptions) => {
     await attempt('connect', async () => {
       const { runConnect } = await import('./launch.js');
-      await runConnect({
-        ...(configOf(opts.config) ? { config: configOf(opts.config) } : {}),
-        ...(opts.open === false ? { open: false } : {}),
-      });
+      await runConnect(startOptions(opts));
     });
   });
 
@@ -94,6 +123,32 @@ program
     }
   });
 
+const ssh = program
+  .command('ssh')
+  .description('Manage a loopback-only browser forward to a Clausroom machine.');
+
+ssh
+  .command('add')
+  .description('Add or update one Clausroom-managed SSH destination.')
+  .argument('<name>', 'short name for the code machine')
+  .requiredOption('--host <host>', 'address of the code machine')
+  .requiredOption('--user <user>', 'SSH user on the code machine')
+  .option('--ssh-port <port>', 'SSH server port', port, 22)
+  .requiredOption('--clausroom-port <port>', 'loopback port Clausroom listens on', port)
+  .action(
+    async (
+      name: string,
+      opts: { host: string; user: string; sshPort: number; clausroomPort: number },
+    ) => {
+      await attempt('SSH setup', async () => {
+        const { addSshForward } = await import('./ssh.js');
+        const result = addSshForward({ name, ...opts });
+        log(`[clausroom] configured ${result.alias} in ${result.config}`);
+        log(`[clausroom] start the browser forward with: ssh -N ${result.alias}`);
+      });
+    },
+  );
+
 program
   .command('mcp', { hidden: true })
   .description('Serve the room tools to a coding agent over stdio. Started by the agent.')
@@ -109,10 +164,15 @@ program
   .command('auto', { hidden: true })
   .description('Answer the room with the local coding agent. Started by host/connect.')
   .option('-c, --config <path>', 'clausroom.toml to use')
-  .action(async (opts: { config?: string }) => {
+  .option('--agent <agent>', 'coding agent selected by the launcher', agent)
+  .action(async (opts: { config?: string; agent?: 'claude' | 'codex' | 'none' }) => {
     await attempt('auto-reply', async () => {
       const { AUTO_READY, runAuto } = await import('./auto.js');
-      await runAuto(configOf(opts.config), () => process.stdout.write(`${AUTO_READY}\n`));
+      await runAuto(
+        configOf(opts.config),
+        () => process.stdout.write(`${AUTO_READY}\n`),
+        opts.agent,
+      );
     });
   });
 

@@ -4,7 +4,7 @@ clausroom is small on purpose. The best contribution keeps it that way.
 
 ## Setup
 
-Node.js 20 or newer.
+Node.js 20.19 or newer.
 
 ```bash
 npm install
@@ -22,9 +22,9 @@ npm run smoke     # the gate
 ## The rules
 
 1. **`npm run smoke` must pass.** It starts a real room, drives the HTTP and
-   WebSocket surface, runs the agent tools over stdio MCP, joins through the real
-   tunnel, and watches the auto-responder answer. Nothing is mocked. If you add
-   behaviour anyone outside the process can observe, add a step for it.
+   WebSocket surface, runs the agent tools over stdio MCP, pairs the browser
+   relay endpoints, and watches the auto-responder answer. Browser WebRTC has a
+   separate real-browser release check. If you add observable behaviour, test it.
 2. **Validate outside input with a schema from `@clausroom/protocol`.** Never a
    hand-rolled check, never a second copy of a schema.
 3. **One way to do each thing.** If you find yourself writing a second path to

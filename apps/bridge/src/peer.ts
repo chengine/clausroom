@@ -1,733 +1,369 @@
 /**
- * The direct link between the two machines.
+ * Guest-side loopback endpoint for browser-owned WebRTC.
  *
- * The host opens no public port. It makes a WebRTC offer and maps authenticated
- * data channels to one fixed loopback address — the room server, and nothing
- * else. The guest runs a loopback-only TCP proxy, so their browser and their
- * agent keep speaking ordinary HTTP and WebSocket.
- *
- * STUN only discovers addresses. TURN URLs are rejected and a relayed candidate
- * pair is refused: if the two networks cannot reach each other directly, this
- * fails instead of routing your room through someone else's server.
+ * Static UI requests stay here. Only /api, /healthz, and /ws TCP connections
+ * are offered to this machine's authenticated browser, one at a time; the
+ * browser maps each to a WebRTC data channel. No frame contains a destination.
  */
 import { randomBytes } from 'node:crypto';
+import fs from 'node:fs';
+import http, { type IncomingMessage, type ServerResponse } from 'node:http';
 import net from 'node:net';
-import readline from 'node:readline/promises';
-import { stdin, stderr } from 'node:process';
-import type {
-  DataChannel,
-  DescriptionType,
-  PeerConnection,
-  SelectedCandidateInfo,
-} from 'node-datachannel';
-import { deferred, log, withTimeout, type Deferred } from './util.js';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import {
+  bindNodeTunnel,
+  PEER,
+  PeerRoomInviteSchema,
+  WEB_CSP,
+  type PeerRoomInvite,
+} from '@clausroom/protocol';
+import { WebSocket, WebSocketServer } from 'ws';
+import { log } from './util.js';
 
-const VERSION = 1;
-const OFFER_PREFIX = 'clausroom-offer-v1.';
-const ANSWER_PREFIX = 'clausroom-answer-v1.';
-const CONTROL = 'clausroom-control-v1';
-const TUNNEL = 'clausroom-tcp-v1';
-const TUNNEL_LABEL = `${TUNNEL}:`;
+export type RoomInvite = PeerRoomInvite;
 
-const SIGNAL_MAX_BYTES = 512 * 1024;
-const GATHER_TIMEOUT_MS = 30_000;
-const AUTH_TIMEOUT_MS = 5 * 60_000;
-const CHUNK_BYTES = 16 * 1024;
-const CHANNEL_HIGH = 1024 * 1024;
-const CHANNEL_LOW = 256 * 1024;
-const QUEUE_MAX = 8 * 1024 * 1024;
-const MAX_TUNNELS = 128;
-
-/** One byte of framing keeps TCP half-close semantics across a data channel. */
-const DATA = 1;
-const END = 2;
-const RESET = 3;
-
-interface Candidate {
-  candidate: string;
-  mid: string;
-}
-
-/**
- * What the host puts inside the offer so the guest needs nothing else: the room
- * id, their one-time browser invite, their agent's room token, and the names the
- * host gave them. Anyone holding the offer can join, so it is a private
- * one-session invitation and must be sent over a channel you trust.
- */
-export interface RoomInvite {
-  room: string;
-  invite: string;
-  token: string;
-  human: string;
-  agent: string;
-}
-
-interface Signal {
-  v: typeof VERSION;
-  kind: 'offer' | 'answer';
-  session: string;
-  sdp: string;
-  candidates: Candidate[];
-  room?: RoomInvite;
-}
-
-/** Only a loopback address, and only the port the room server listens on. */
-interface Target {
-  host: '127.0.0.1' | '::1';
+export interface GuestRelayOptions {
   port: number;
-  url: string;
+  onJoin: (invite: RoomInvite) => Promise<string>;
 }
 
-export interface HostOptions {
-  port: number;
-  stun: string[];
-  invite: RoomInvite;
+export interface GuestRelay {
+  readonly port: number;
+  readonly url: string;
+  readonly secret: string;
+  close(): Promise<void>;
 }
 
-export interface JoinOptions {
-  port: number;
-  stun: string[];
-  onReady: (details: { url: string; invite: RoomInvite }) => Promise<void>;
+const HEADER_BYTES = 8192;
+const WAIT_MS = 30_000;
+const CONTROL_BYTES = 8192;
+
+interface Pending {
+  socket: net.Socket;
+  timer: NodeJS.Timeout;
 }
 
-/** Machine-readable lines the launcher and the tests read off stdout. */
-function emit(name: string, value: string): void {
-  process.stdout.write(`${name} ${value}\n`);
+function webDist(): string {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    path.join(here, 'web'),
+    path.resolve(here, '..', '..', 'web', 'dist'),
+  ];
+  const root = candidates.find((candidate) => fs.existsSync(path.join(candidate, 'index.html')));
+  if (!root) throw new Error('the web UI is not built; run `npm run build` in the Clausroom checkout');
+  return root;
 }
 
-function target(port: number): Target {
-  if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    throw new Error(`the room server port must be 1-65535 (got ${port})`);
-  }
-  return { host: '127.0.0.1', port, url: `http://127.0.0.1:${port}` };
-}
-
-function checkStun(urls: string[]): string[] {
-  for (const url of urls) {
-    if (!url.startsWith('stun:') && !url.startsWith('stuns:')) {
-      throw new Error(`peer mode allows STUN only; TURN relays are refused (got ${url})`);
-    }
-  }
-  return urls;
-}
-
-const isRoomInvite = (value: unknown): value is RoomInvite => {
-  const r = value as Partial<RoomInvite> | null;
+function contentType(file: string): string {
+  const ext = path.extname(file);
   return (
-    typeof r === 'object' &&
-    r !== null &&
-    typeof r.room === 'string' &&
-    /^room_[0-9a-f]{24}$/.test(r.room) &&
-    typeof r.invite === 'string' &&
-    /^arit_[0-9a-f]{32}$/.test(r.invite) &&
-    typeof r.token === 'string' &&
-    /^arbt_[0-9a-f]{32}$/.test(r.token) &&
-    typeof r.human === 'string' &&
-    r.human.length > 0 &&
-    r.human.length <= 100 &&
-    typeof r.agent === 'string' &&
-    r.agent.length > 0 &&
-    r.agent.length <= 100
+    {
+      '.css': 'text/css; charset=utf-8',
+      '.html': 'text/html; charset=utf-8',
+      '.js': 'text/javascript; charset=utf-8',
+      '.json': 'application/json; charset=utf-8',
+      '.png': 'image/png',
+      '.svg': 'image/svg+xml',
+      '.woff2': 'font/woff2',
+    }[ext] ?? 'application/octet-stream'
   );
-};
-
-function encode(signal: Signal): string {
-  const prefix = signal.kind === 'offer' ? OFFER_PREFIX : ANSWER_PREFIX;
-  return prefix + Buffer.from(JSON.stringify(signal), 'utf8').toString('base64url');
 }
 
-/** Parse one pasted code, rejecting anything that is not the expected shape. */
-function decode(raw: string, kind: Signal['kind']): Signal {
-  const label = kind === 'offer' ? 'CLAUSROOM_PEER_OFFER ' : 'CLAUSROOM_PEER_ANSWER ';
-  const trimmed = raw.trim();
-  const text = trimmed.startsWith(label) ? trimmed.slice(label.length).trim() : trimmed;
-  if (text.length > SIGNAL_MAX_BYTES * 2) throw new Error(`that ${kind} is too long`);
+function secure(res: ServerResponse): void {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  // A connection classified as local must never later be reused for /api.
+  res.setHeader('Connection', 'close');
+  res.setHeader('Content-Security-Policy', WEB_CSP);
+}
 
-  const prefix = kind === 'offer' ? OFFER_PREFIX : ANSWER_PREFIX;
-  if (!text.startsWith(prefix)) throw new Error(`a clausroom ${kind} starts with ${prefix}`);
-  const decoded = Buffer.from(text.slice(prefix.length), 'base64url');
-  if (decoded.byteLength === 0 || decoded.byteLength > SIGNAL_MAX_BYTES) {
-    throw new Error(`that ${kind} is the wrong size`);
-  }
+/** Serve only the immutable build; API and room WebSockets never reach here. */
+function staticHandler(root: string): (req: IncomingMessage, res: ServerResponse) => void {
+  return (req, res) => {
+    secure(res);
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      res.writeHead(405).end();
+      return;
+    }
+    let pathname: string;
+    try {
+      pathname = decodeURIComponent(new URL(req.url ?? '/', 'http://localhost').pathname);
+    } catch {
+      res.writeHead(400).end();
+      return;
+    }
+    if (pathname.includes('\0')) {
+      res.writeHead(400).end();
+      return;
+    }
+    const requested = path.resolve(root, `.${pathname}`);
+    if (requested !== root && !requested.startsWith(`${path.resolve(root)}${path.sep}`)) {
+      res.writeHead(404).end();
+      return;
+    }
+    const serve = (file: string, fallback = false): void => fs.stat(file, (error, stat) => {
+      if (error || !stat.isFile()) {
+        if (!fallback && !pathname.startsWith('/assets/')) {
+          serve(path.join(root, 'index.html'), true);
+          return;
+        }
+        res.writeHead(404).end();
+        return;
+      }
+      res.setHeader('Content-Type', contentType(file));
+      res.setHeader('Content-Length', stat.size);
+      if (req.method === 'HEAD') res.end();
+      else {
+        const stream = fs.createReadStream(file);
+        stream.once('error', () => res.destroy());
+        stream.pipe(res);
+      }
+    });
+    serve(requested);
+  };
+}
 
-  let value: Partial<Signal>;
+/** A browser WebSocket must have come from this exact loopback origin. */
+function localBrowser(req: IncomingMessage, port: number, secret: string, url: URL): boolean {
+  const host = req.headers.host ?? '';
+  const expected = port === 80 ? '127.0.0.1' : `127.0.0.1:${port}`;
+  return (
+    host === expected &&
+    req.headers.origin === `http://${host}` &&
+    url.searchParams.get('secret') === secret
+  );
+}
+
+function send(ws: WebSocket | null, value: unknown): void {
+  if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(value));
+}
+
+/** True only for the three fixed Clausroom surfaces that may cross the peer. */
+function isRoomRequest(firstLine: string): boolean {
+  const match = /^[A-Z]+ (\/\S*) HTTP\/1\.[01]$/.exec(firstLine);
+  if (!match?.[1]) return false;
+  let pathname: string;
   try {
-    value = JSON.parse(decoded.toString('utf8')) as Partial<Signal>;
+    pathname = new URL(match[1], 'http://localhost').pathname;
   } catch {
-    throw new Error(`that ${kind} is not readable`);
+    return false;
   }
-  if (
-    typeof value !== 'object' ||
-    value === null ||
-    value.v !== VERSION ||
-    value.kind !== kind ||
-    typeof value.session !== 'string' ||
-    !/^[A-Za-z0-9_-]{16,64}$/.test(value.session) ||
-    typeof value.sdp !== 'string' ||
-    value.sdp.length > SIGNAL_MAX_BYTES ||
-    !value.sdp.includes('a=fingerprint:') ||
-    !Array.isArray(value.candidates) ||
-    value.candidates.length > 256 ||
-    value.candidates.some(
-      (c) =>
-        typeof c !== 'object' ||
-        c === null ||
-        typeof c.candidate !== 'string' ||
-        c.candidate.length > 4096 ||
-        typeof c.mid !== 'string' ||
-        c.mid.length > 64,
-    ) ||
-    (value.room !== undefined && (kind !== 'offer' || !isRoomInvite(value.room)))
-  ) {
-    throw new Error(`that ${kind} is malformed`);
-  }
-  return value as Signal;
+  return (
+    pathname === '/healthz' ||
+    pathname === '/ws' ||
+    pathname === '/api' ||
+    pathname.startsWith('/api/')
+  );
 }
 
-/**
- * Keep prompting until a pasted signal parses. A mistyped paste must not tear
- * the room down, and there is no deadline on either side: carrying a code across
- * to another person is a human step.
- */
-async function readSignal(
-  kind: Signal['kind'],
-  check?: (signal: Signal) => void,
-): Promise<Signal> {
-  const rl = readline.createInterface({ input: stdin, output: stderr });
-  try {
-    for (;;) {
-      const raw = await rl.question(`\nPaste the ${kind} here, then press Enter:\n> `);
-      try {
-        const signal = decode(raw, kind);
-        check?.(signal);
-        return signal;
-      } catch (err) {
-        log(`that ${kind} was not accepted: ${err instanceof Error ? err.message : String(err)}`);
-        log(`still waiting — paste the right ${kind} and try again`);
-      }
-    }
-  } finally {
-    rl.close();
-  }
-}
-
-interface Gathered {
-  candidates: Candidate[];
-  description: Deferred<{ sdp: string; type: DescriptionType }>;
-  complete: Deferred<void>;
-}
-
-function gather(pc: PeerConnection): Gathered {
-  const candidates: Candidate[] = [];
-  const description = deferred<{ sdp: string; type: DescriptionType }>();
-  const complete = deferred<void>();
-  pc.onLocalDescription((sdp, type) => description.resolve({ sdp, type }));
-  pc.onLocalCandidate((candidate, mid) => candidates.push({ candidate, mid }));
-  pc.onGatheringStateChange((state) => {
-    if (state === 'complete') complete.resolve();
-  });
-  return { candidates, description, complete };
-}
-
-/** "host/UDP=2, srflx/UDP=1" — enough to see what ICE actually found. */
-function summarize(candidates: Candidate[]): string {
-  const counts = new Map<string, number>();
-  for (const { candidate } of candidates) {
-    const transport = candidate.match(/\s(UDP|TCP)\s/i)?.[1]?.toUpperCase() ?? '?';
-    const type = candidate.match(/\styp\s+([A-Za-z0-9_-]+)/i)?.[1]?.toLowerCase() ?? '?';
-    const key = `${type}/${transport}`;
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-  }
-  return counts.size === 0
-    ? 'none'
-    : [...counts]
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([key, count]) => `${key}=${count}`)
-        .join(', ');
-}
-
-async function buildSignal(
-  pc: PeerConnection,
-  gathered: Gathered,
-  kind: Signal['kind'],
-  session: string,
-  room?: RoomInvite,
-): Promise<Signal> {
-  const [{ sdp, type }] = await Promise.all([
-    withTimeout(gathered.description.promise, GATHER_TIMEOUT_MS, 'local description'),
-    withTimeout(gathered.complete.promise, GATHER_TIMEOUT_MS, 'ICE gathering'),
-  ]);
-  if (type !== kind) throw new Error(`WebRTC produced ${type}, expected ${kind}`);
-  log(`found ICE candidates: ${summarize(gathered.candidates)}`);
-  return {
-    v: VERSION,
-    kind,
-    session,
-    sdp: pc.localDescription()?.sdp ?? sdp,
-    candidates: gathered.candidates,
-    ...(kind === 'offer' && room ? { room } : {}),
-  };
-}
-
-function applySignal(pc: PeerConnection, signal: Signal): void {
-  pc.setRemoteDescription(signal.sdp, signal.kind);
-  for (const { candidate, mid } of signal.candidates) pc.addRemoteCandidate(candidate, mid);
-}
-
-function frame(type: number, payload?: Buffer): Buffer {
-  if (!payload || payload.byteLength === 0) return Buffer.from([type]);
-  const out = Buffer.allocUnsafe(payload.byteLength + 1);
-  out[0] = type;
-  payload.copy(out, 1);
-  return out;
-}
-
-/**
- * Join one data channel to one TCP socket, in both directions, with flow control
- * on both sides. The tunnel never interprets the bytes it carries: they are not
- * a path, a command, or a filename to it.
- */
-function bind(dc: DataChannel, socket: net.Socket, onDone: () => void): void {
-  let open = dc.isOpen();
-  let localEnded = false;
-  let remoteEnded = false;
-  let done = false;
-  let queuedBytes = 0;
-  let retry: NodeJS.Timeout | undefined;
-  const queue: Buffer[] = [];
-
-  // The native channel can be torn down by the peer at any moment, so every
-  // query about it has to tolerate throwing.
-  const isOpen = (): boolean => {
-    try {
-      return dc.isOpen();
-    } catch {
-      return false;
-    }
-  };
-  const buffered = (): number => {
-    try {
-      return dc.bufferedAmount();
-    } catch {
-      return Number.POSITIVE_INFINITY;
-    }
-  };
-
-  const finish = (reset: boolean): void => {
-    if (done) return;
-    done = true;
-    if (retry) clearTimeout(retry);
-    try {
-      if (reset && isOpen()) dc.sendMessageBinary(frame(RESET));
-      dc.close();
-    } catch {
-      /* already gone */
-    }
-    socket.destroy();
-    onDone();
-  };
-
-  const applyBackpressure = (): void => {
-    if (!done && open && queuedBytes < CHANNEL_HIGH && buffered() < CHANNEL_HIGH) socket.resume();
-    else socket.pause();
-  };
-
-  const closeWhenDrained = (): void => {
-    if (!localEnded || !remoteEnded || queue.length > 0 || done) return;
-    if (buffered() > 0) {
-      scheduleRetry();
-      return;
-    }
-    finish(false);
-  };
-
-  const scheduleRetry = (): void => {
-    if (retry || done) return;
-    retry = setTimeout(() => {
-      retry = undefined;
-      pump();
-    }, 10);
-    retry.unref();
-  };
-
-  const pump = (): void => {
-    if (done || !open) {
-      applyBackpressure();
-      return;
-    }
-    while (queue.length > 0) {
-      if (buffered() >= CHANNEL_HIGH) {
-        // Wait for the channel to drain. onBufferedAmountLow normally wakes us;
-        // the timer is insurance against a missed callback stalling the tunnel.
-        scheduleRetry();
-        break;
-      }
-      const next = queue[0];
-      if (!next) break;
-      try {
-        // A false return means libdatachannel buffered the message instead of
-        // sending it right away. It is queued either way, so the frame must be
-        // dropped from our queue — re-sending it would duplicate bytes in the
-        // stream and corrupt whatever is being carried.
-        dc.sendMessageBinary(next);
-      } catch {
-        finish(false);
-        return;
-      }
-      queue.shift();
-      queuedBytes -= next.byteLength;
-    }
-    applyBackpressure();
-    closeWhenDrained();
-  };
-
-  const enqueue = (type: number, payload?: Buffer): boolean => {
-    if (done) return false;
-    const out = frame(type, payload);
-    if (queuedBytes + out.byteLength > QUEUE_MAX) {
-      log('closing a tunnel whose send queue outgrew its memory limit');
-      finish(true);
-      return false;
-    }
-    queue.push(out);
-    queuedBytes += out.byteLength;
-    pump();
-    return !done;
-  };
-
-  socket.pause();
-  dc.setBufferedAmountLowThreshold(CHANNEL_LOW);
-  dc.onOpen(() => {
-    open = true;
-    pump();
-  });
-  dc.onBufferedAmountLow(pump);
-  dc.onError((why) => {
-    log(`data channel error: ${why}`);
-    finish(false);
-  });
-  dc.onClosed(() => {
-    if (done) return;
-    done = true;
-    socket.destroy();
-    onDone();
-  });
-  dc.onMessage((raw) => {
-    const buffer = typeof raw === 'string' ? null : Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
-    if (!buffer || buffer.byteLength < 1) return finish(true);
-    switch (buffer[0]) {
-      case DATA: {
-        if (remoteEnded || buffer.byteLength === 1 || buffer.byteLength > CHUNK_BYTES + 1) {
-          return finish(true);
-        }
-        socket.write(buffer.subarray(1));
-        if (socket.writableLength > QUEUE_MAX) {
-          log('closing a tunnel whose receiver outgrew its memory limit');
-          finish(true);
-        }
-        return;
-      }
-      case END:
-        if (buffer.byteLength !== 1 || remoteEnded) return finish(true);
-        remoteEnded = true;
-        socket.end();
-        return closeWhenDrained();
-      case RESET:
-        return finish(false);
-      default:
-        return finish(true);
-    }
-  });
-
-  socket.on('data', (chunk: Buffer) => {
-    for (let at = 0; at < chunk.byteLength; at += CHUNK_BYTES) {
-      if (!enqueue(DATA, chunk.subarray(at, at + CHUNK_BYTES))) return;
-    }
-  });
-  socket.on('end', () => {
-    localEnded = true;
-    enqueue(END);
-    closeWhenDrained();
-  });
-  socket.on('error', (err) => {
-    log(`tunnel socket error: ${err.message}`);
-    finish(true);
-  });
-  socket.on('close', (hadError) => {
-    if (!done && (hadError || (!localEnded && !remoteEnded))) finish(true);
-    else closeWhenDrained();
-  });
-
-  pump();
-}
-
-interface Lifecycle {
-  connected: Deferred<void>;
-  closed: Deferred<void>;
-  failed: Deferred<never>;
-}
-
-function lifecycle(pc: PeerConnection): Lifecycle {
-  const connected = deferred<void>();
-  const closed = deferred<void>();
-  const failed = deferred<never>();
-  // ICE can fail while a human is still carrying the answer across. Mark the
-  // rejection handled now; every caller still races the original promise.
-  void failed.promise.catch(() => undefined);
-  pc.onStateChange((state) => {
-    log(`connection: ${state}`);
-    if (state === 'connected') connected.resolve();
-    else if (state === 'closed') closed.resolve();
-    else if (state === 'failed') {
-      failed.reject(
-        new Error(
-          'the direct connection failed: ICE found no usable path between the two networks',
-        ),
-      );
-    }
-  });
-  return { connected, closed, failed };
-}
-
-/** Report the chosen path, and refuse it outright if it turned out to be a relay. */
-function reportPath(pc: PeerConnection): void {
-  const pair = pc.getSelectedCandidatePair();
-  if (!pair) {
-    emit('CLAUSROOM_PEER_PATH', 'direct');
-    return;
-  }
-  if (pair.local.type === 'relay' || pair.remote.type === 'relay') {
-    pc.close();
-    throw new Error('refusing a relayed connection: peer mode is direct-only');
-  }
-  const describe = (c: SelectedCandidateInfo) =>
-    `${c.type}/${c.transportType} ${c.address}:${c.port}`;
-  emit('CLAUSROOM_PEER_PATH', `direct ${describe(pair.local)} -> ${describe(pair.remote)}`);
-}
-
-function onShutdown(close: () => void): () => void {
-  process.once('SIGINT', close);
-  process.once('SIGTERM', close);
-  return () => {
-    process.removeListener('SIGINT', close);
-    process.removeListener('SIGTERM', close);
-  };
-}
-
-async function loadRtc(): Promise<typeof import('node-datachannel').default> {
-  try {
-    return (await import('node-datachannel')).default;
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ERR_MODULE_NOT_FOUND') {
-      throw new Error(
-        'the direct connection needs the optional node-datachannel package; reinstall clausroom with optional dependencies enabled',
-      );
-    }
-    throw err;
-  }
-}
-
-function connection(rtc: Awaited<ReturnType<typeof loadRtc>>, name: string, stun: string[]) {
-  return new rtc.PeerConnection(name, {
-    iceServers: stun,
-    enableIceTcp: true,
-    disableAutoNegotiation: true,
-    maxMessageSize: 256 * 1024,
-  });
-}
-
-/** A short handshake binding the connection to the session in the offer. */
-function hello(session: string, role: 'host' | 'join'): string {
-  return JSON.stringify({ v: VERSION, session, role });
-}
-
-function checkHello(raw: unknown, session: string, expect: 'host' | 'join'): void {
-  if (typeof raw !== 'string' || raw.length > 1024) throw new Error('bad peer greeting');
-  const parsed = JSON.parse(raw) as { v?: unknown; session?: unknown; role?: unknown };
-  if (parsed.v !== VERSION || parsed.session !== session || parsed.role !== expect) {
-    throw new Error('this peer belongs to a different session');
-  }
-}
-
-/** Offer, wait for the answer, then forward only to the fixed loopback port. */
-export async function peerHost(options: HostOptions): Promise<void> {
-  const fixed = target(options.port);
-  const stun = checkStun(options.stun);
-  const rtc = await loadRtc();
-  const session = randomBytes(18).toString('base64url');
-  const pc = connection(rtc, 'clausroom-host', stun);
-  const life = lifecycle(pc);
-  const gathered = gather(pc);
-  const authorized = deferred<void>();
-  void authorized.promise.catch(() => undefined);
-  let authenticated = false;
-  let tunnels = 0;
-
-  const control = pc.createDataChannel(CONTROL, { protocol: CONTROL });
-  control.onMessage((raw) => {
-    if (authenticated) return;
-    try {
-      checkHello(raw, session, 'join');
-      authenticated = true;
-      if (!control.sendMessage(hello(session, 'host'))) throw new Error('could not reply');
-      authorized.resolve();
-    } catch (err) {
-      authorized.reject(err instanceof Error ? err : new Error(String(err)));
-      pc.close();
-    }
-  });
-  control.onError((why) => authorized.reject(new Error(`control channel failed: ${why}`)));
-  control.onClosed(() => {
-    if (!authenticated) authorized.reject(new Error('the peer left before authenticating'));
-  });
-
-  pc.onDataChannel((dc) => {
-    if (
-      !authenticated ||
-      dc.getProtocol() !== TUNNEL ||
-      !dc.getLabel().startsWith(TUNNEL_LABEL) ||
-      tunnels >= MAX_TUNNELS
-    ) {
-      dc.close();
-      return;
-    }
-    tunnels += 1;
-    bind(dc, net.createConnection({ host: fixed.host, port: fixed.port }), () => {
-      tunnels -= 1;
-    });
-  });
-
-  const detach = onShutdown(() => pc.close());
-  try {
-    pc.setLocalDescription('offer');
-    const offer = await buildSignal(pc, gathered, 'offer', session, options.invite);
-    log(`forwarding only to ${fixed.url}`);
-    log(stun.length === 0 ? 'STUN is off; trying local addresses only' : `STUN: ${stun.join(', ')}`);
-    emit('CLAUSROOM_PEER_OFFER', encode(offer));
-
-    const answer = await readSignal('answer', (signal) => {
-      if (signal.session !== session) throw new Error('that answer is for a different session');
-    });
-    applySignal(pc, answer);
-
-    await withTimeout(
-      Promise.race([authorized.promise, life.failed.promise]),
-      AUTH_TIMEOUT_MS,
-      'peer authentication',
-    );
-    await life.connected.promise;
-    reportPath(pc);
-    emit('CLAUSROOM_PEER_READY', fixed.url);
-    await Promise.race([life.closed.promise, life.failed.promise]);
-  } finally {
-    detach();
-    pc.close();
-    rtc.cleanup();
-  }
-}
-
-/** Take an offer, answer it, and serve the room on a loopback port. */
-export async function peerJoin(options: JoinOptions): Promise<void> {
+export async function startGuestRelay(options: GuestRelayOptions): Promise<GuestRelay> {
   if (!Number.isInteger(options.port) || options.port < 0 || options.port > 65535) {
-    throw new Error('peer.port must be an integer from 0 to 65535');
+    throw new Error(`peer.port must be an integer from 0 to 65535 (got ${options.port})`);
   }
-  const stun = checkStun(options.stun);
-  const offer = await readSignal('offer');
-  if (!offer.room) {
-    throw new Error('that offer carries no room credentials — ask the host to send a fresh one');
-  }
-  const rtc = await loadRtc();
-  const pc = connection(rtc, 'clausroom-guest', stun);
-  const life = lifecycle(pc);
-  const gathered = gather(pc);
-  const authorized = deferred<void>();
-  void authorized.promise.catch(() => undefined);
-  let control: DataChannel | null = null;
-  let nextTunnel = 1;
-  let tunnels = 0;
+  const root = webDist();
+  const secret = randomBytes(32).toString('hex');
+  const local = http.createServer(staticHandler(root));
+  const controls = new WebSocketServer({ noServer: true, maxPayload: CONTROL_BYTES, perMessageDeflate: false });
+  const tunnels = new WebSocketServer({ noServer: true, maxPayload: PEER.CHUNK_BYTES, perMessageDeflate: false });
+  const front = net.createServer();
+  const sockets = new Set<net.Socket>();
+  const innerSockets = new Set<net.Socket>();
+  const active = new Set<WebSocket>();
+  const pending = new Map<string, Pending>();
+  let control: WebSocket | null = null;
+  let port = 0;
+  let localPort = 0;
+  let closing = false;
+  let joined: { invite: RoomInvite; token: Promise<string> } | null = null;
 
-  pc.onDataChannel((dc) => {
-    if (control !== null || dc.getLabel() !== CONTROL || dc.getProtocol() !== CONTROL) {
-      dc.close();
+  const announce = (id: string): void => send(control, { type: 'tunnel', id });
+  const queue = (socket: net.Socket): void => {
+    if (pending.size >= PEER.MAX_TUNNELS) {
+      socket.destroy();
       return;
     }
-    control = dc;
-    dc.onMessage((raw) => {
-      try {
-        checkHello(raw, offer.session, 'host');
-        authorized.resolve();
-      } catch (err) {
-        authorized.reject(err instanceof Error ? err : new Error(String(err)));
-        pc.close();
-      }
+    const id = randomBytes(12).toString('hex');
+    const timer = setTimeout(() => {
+      pending.delete(id);
+      socket.destroy();
+    }, WAIT_MS);
+    timer.unref();
+    pending.set(id, { socket, timer });
+    socket.once('close', () => {
+      if (pending.get(id)?.socket !== socket) return;
+      clearTimeout(timer);
+      pending.delete(id);
     });
-    const greet = (): void => {
-      if (!dc.sendMessage(hello(offer.session, 'join'))) {
-        authorized.reject(new Error('could not greet the host'));
+    announce(id);
+  };
+
+  /** Peek only at the request line, then hand the untouched stream to one side. */
+  front.on('connection', (socket) => {
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
+    socket.once('error', () => socket.destroy());
+    const chunks: Buffer[] = [];
+    let size = 0;
+    const timeout = setTimeout(() => socket.destroy(), WAIT_MS);
+    timeout.unref();
+    const sniff = (chunk: Buffer): void => {
+      chunks.push(chunk);
+      size += chunk.byteLength;
+      const raw = Buffer.concat(chunks, size);
+      const end = raw.indexOf('\r\n');
+      if (end < 0 && size <= HEADER_BYTES) return;
+      clearTimeout(timeout);
+      socket.pause();
+      socket.removeListener('data', sniff);
+      if (end < 0 || end > HEADER_BYTES) {
+        socket.destroy();
+        return;
+      }
+      socket.unshift(raw);
+      if (isRoomRequest(raw.subarray(0, end).toString('latin1'))) queue(socket);
+      else {
+        const inner = net.createConnection({ host: '127.0.0.1', port: localPort });
+        const fail = () => {
+          socket.destroy();
+          inner.destroy();
+        };
+        socket.pipe(inner).pipe(socket);
+        socket.once('error', fail);
+        inner.once('error', fail);
+        socket.resume();
       }
     };
-    if (dc.isOpen()) greet();
-    else dc.onOpen(greet);
-    dc.onError((why) => authorized.reject(new Error(`control channel failed: ${why}`)));
-    dc.onClosed(() => authorized.reject(new Error('the host left before authenticating')));
+    socket.on('data', sniff);
   });
 
-  const proxy = net.createServer((socket) => {
-    if (tunnels >= MAX_TUNNELS || pc.state() !== 'connected') {
-      socket.destroy();
-      return;
-    }
-    tunnels += 1;
-    let dc: DataChannel;
+  local.on('connect', (_req, socket) => socket.destroy());
+  local.on('connection', (socket) => {
+    innerSockets.add(socket);
+    socket.once('close', () => innerSockets.delete(socket));
+  });
+  local.on('upgrade', (req, socket, head) => {
+    let url: URL;
     try {
-      dc = pc.createDataChannel(`${TUNNEL_LABEL}${nextTunnel++}`, { protocol: TUNNEL });
+      url = new URL(req.url ?? '/', 'http://localhost');
     } catch {
-      tunnels -= 1;
-      socket.destroy();
-      return;
+      return socket.destroy();
     }
-    bind(dc, socket, () => {
-      tunnels -= 1;
+    if (!localBrowser(req, port, secret, url)) return socket.destroy();
+    if (url.pathname === `${PEER.PATH}/control`) {
+      return controls.handleUpgrade(req, socket, head, (ws) => {
+        ws.on('error', () => undefined);
+        if (control?.readyState === WebSocket.OPEN) control.close(4009, 'browser reconnected');
+        control = ws;
+        for (const id of pending.keys()) announce(id);
+        ws.on('message', (raw, binary) => {
+          const text = String(raw);
+          if (binary || Buffer.byteLength(text) > CONTROL_BYTES) return ws.close(4002, 'bad control frame');
+          let value: unknown;
+          try {
+            value = JSON.parse(text);
+          } catch {
+            return send(ws, { type: 'error', message: 'Unreadable browser handshake.' });
+          }
+          const message = value as { type?: unknown; invite?: unknown };
+          const invite = PeerRoomInviteSchema.safeParse(message.invite);
+          if (message.type !== 'join' || !invite.success) {
+            return send(ws, { type: 'error', message: 'Invalid browser handshake.' });
+          }
+          const same =
+            joined &&
+            joined.invite.room === invite.data.room &&
+            joined.invite.human_id === invite.data.human_id &&
+            joined.invite.token === invite.data.token &&
+            joined.invite.human === invite.data.human &&
+            joined.invite.agent === invite.data.agent;
+          if (joined && !same) {
+            return send(ws, { type: 'error', message: 'This connector already joined another room.' });
+          }
+          if (!joined || joined.invite.invite !== invite.data.invite) {
+            joined = { invite: invite.data, token: options.onJoin(invite.data) };
+          }
+          const current = joined;
+          void current.token.then(
+            (token) => send(ws, { type: 'session', token, invite: current.invite.invite }),
+            (error: unknown) => {
+              if (joined !== current) return;
+              log(`[clausroom] could not finish joining: ${error instanceof Error ? error.message : String(error)}`);
+              send(ws, { type: 'error', message: 'The local connector could not finish joining.' });
+              joined = null;
+            },
+          );
+        });
+        ws.once('close', () => {
+          if (control === ws) control = null;
+        });
+      });
+    }
+    if (url.pathname !== `${PEER.PATH}/tunnel`) return socket.destroy();
+    const id = url.searchParams.get('id') ?? '';
+    const waiting = pending.get(id);
+    if (!waiting || !/^[0-9a-f]{24}$/.test(id)) return socket.destroy();
+    tunnels.handleUpgrade(req, socket, head, (ws) => {
+      pending.delete(id);
+      clearTimeout(waiting.timer);
+      active.add(ws);
+      const drop = () => active.delete(ws);
+      ws.once('close', drop);
+      ws.once('error', drop);
+      bindNodeTunnel(waiting.socket, ws);
     });
   });
-  proxy.on('error', (err) => {
-    log(`local proxy error: ${err.message}`);
-    pc.close();
-  });
 
-  const detach = onShutdown(() => {
-    proxy.close();
-    pc.close();
+  await new Promise<void>((resolve, reject) => {
+    local.once('error', reject);
+    local.listen(0, '127.0.0.1', resolve);
   });
+  const localAddress = local.address();
+  localPort = localAddress && typeof localAddress === 'object' ? localAddress.port : 0;
   try {
-    applySignal(pc, offer);
-    pc.setLocalDescription('answer');
-    const answer = await buildSignal(pc, gathered, 'answer', offer.session);
-    emit('CLAUSROOM_PEER_ANSWER', encode(answer));
-    log('send that answer back to the host; there is no deadline');
-
-    // No timeout here on purpose: carrying the answer back is a human step, and
-    // the host runs the bounded connectivity check once it arrives.
-    await Promise.race([authorized.promise, life.failed.promise]);
-    await life.connected.promise;
-    reportPath(pc);
-
     await new Promise<void>((resolve, reject) => {
-      proxy.once('error', reject);
-      proxy.listen({ host: '127.0.0.1', port: options.port }, resolve);
+      front.once('error', (error: NodeJS.ErrnoException) =>
+        reject(
+          error.code === 'EADDRINUSE'
+            ? new Error(
+                `peer.port ${options.port} is already in use; choose another in clausroom.toml`,
+              )
+            : error,
+        ),
+      );
+      front.listen(options.port, '127.0.0.1', resolve);
     });
-    const address = proxy.address();
-    if (!address || typeof address === 'string') throw new Error('the local proxy did not bind');
-    const url = `http://127.0.0.1:${address.port}`;
-    // Ready means the room is usable, not merely that the socket is bound, so
-    // the line comes after the session has been set up.
-    await options.onReady({ url, invite: offer.room });
-    emit('CLAUSROOM_PEER_READY', url);
-    await Promise.race([life.closed.promise, life.failed.promise]);
-  } finally {
-    detach();
-    proxy.close();
-    pc.close();
-    rtc.cleanup();
+  } catch (error) {
+    controls.close();
+    tunnels.close();
+    await new Promise<void>((resolve) => local.close(() => resolve()));
+    throw error;
   }
+  const address = front.address();
+  port = address && typeof address === 'object' ? address.port : options.port;
+  const url = `http://127.0.0.1:${port}`;
+
+  return {
+    port,
+    url,
+    secret,
+    close: async () => {
+      if (closing) return;
+      closing = true;
+      control?.terminate();
+      for (const ws of active) ws.terminate();
+      for (const waiting of pending.values()) {
+        clearTimeout(waiting.timer);
+        waiting.socket.destroy();
+      }
+      pending.clear();
+      for (const socket of sockets) socket.destroy();
+      for (const socket of innerSockets) socket.destroy();
+      controls.close();
+      tunnels.close();
+      await new Promise<void>((resolve) => front.close(() => resolve()));
+      await new Promise<void>((resolve) => local.close(() => resolve()));
+    },
+  };
 }

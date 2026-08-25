@@ -3,7 +3,6 @@
  * membership guard, the message body seatbelts, and the one path that accepts a
  * message (insert, broadcast, log).
  */
-import path from 'node:path';
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import type { z, ZodTypeAny } from 'zod';
 import type { ErrorCode, Message, Participant, Room, User } from '@clausroom/protocol';
@@ -164,15 +163,6 @@ const REDACTIONS = REDACTION_PATTERNS.map((src) => new RegExp(src, 'g'));
  */
 export function redact(body: string): string {
   return REDACTIONS.reduce((text, re) => text.replace(re, '[redacted-secret]'), body);
-}
-
-/** Basename only, safe characters only, 128 chars max. */
-export function safeFilename(original: string): string {
-  const cleaned = path
-    .basename(original ?? '')
-    .replace(/[^A-Za-z0-9._\- ()]/g, '_')
-    .slice(0, 128);
-  return cleaned || 'file';
 }
 
 /**

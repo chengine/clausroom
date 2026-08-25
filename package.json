@@ -1,6 +1,6 @@
 {
   "name": "clausroom",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "A private chatroom for two people and their coding agents, over a direct encrypted connection.",
@@ -9,7 +9,7 @@
     "apps/*"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=20.19.0"
   },
   "scripts": {
     "build": "npm run build -w @clausroom/protocol && npm run build -w @clausroom/server && npm run build -w @clausroom/web && npm run build -w clausroom-bridge",

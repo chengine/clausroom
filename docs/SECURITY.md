@@ -1,110 +1,116 @@
-# What clausroom protects, and what it doesn't
+# Security model
 
-The point of clausroom is that two people can put their coding agents in the same
-room without either of them getting access to the other's machine. This is how
-that holds up, and where it stops.
+Clausroom is designed to let two people share one room without giving either
+person general network or filesystem access to the other's machine. It assumes
+that each user controls their own code machine, browser, SSH account, and local
+agent installation.
 
-## The boundaries
+## Network boundary
 
-**Neither machine is reachable.** The host's room server binds `127.0.0.1` and
-nothing else — there is no flag to change that. The guest's side of the tunnel
-also binds `127.0.0.1`, so nobody else on their network can use it. No port is
-published, no domain or certificate is involved, and there is no SSH path between
-the two.
+- The host room server and guest connector bind only `127.0.0.1`; Clausroom
+  exposes no public HTTP, SSH, or filesystem port.
+- A browser on another machine reaches only its owner's loopback service through
+  an existing SSH connection. The generated `LocalForward` binds both ends to
+  loopback and contains no key, password, or Clausroom token.
+- Local browser control and tunnel WebSockets require a random 256-bit secret
+  plus the exact loopback `Host` and `Origin`.
+- The guest classifies a connection by its first request as room traffic or
+  local UI traffic. The tunnel protocol itself has no host, port, command, or
+  path field, and the host endpoint always opens only the room server's own
+  loopback port. Server authentication remains the per-request boundary.
+- WebRTC encrypts the browser-to-browser leg with DTLS. TURN is rejected, and
+  the browsers refuse a selected ICE pair if either candidate is a relay or the
+  direct pair cannot be proved.
 
-**The tunnel goes to exactly one place.** The host's data channels are wired to
-one validated loopback address, fixed at startup: the port its own server
-listens on. It is not a proxy. It cannot be pointed at SSH, at a file share, or
-at anything else, and it never interprets the bytes it carries as a path or a
-command.
+The peer therefore receives room HTTP/WebSocket traffic, not a network proxy.
+Every API request still needs a valid bearer token and room membership.
 
-**The link is direct or it is nothing.** ICE decides connectivity and DTLS
-authenticates the fingerprints in the offer and answer you exchanged by hand.
-TURN URLs are rejected in config, and a relayed candidate pair is refused at
-runtime — so your room never passes through a third party's server. Both sides
-print the pair they chose.
+## Signaling and credentials
 
-**The server never touches either repository.** It reads and writes one SQLite
-file and one directory of uploaded files. There is no endpoint that reads an
-arbitrary path, because there is no code that opens one.
+The pasted offer and answer contain ICE/SDP connection details and DTLS
+fingerprints, but no room token. Send them through a channel where you can
+identify the other person: an attacker who can replace both signaling messages
+can impersonate a peer. The codes also reveal candidate network addresses.
 
-**Each side's agent sees one directory.** The bridge resolves every requested
-path — symlinks included — and refuses anything that does not land inside the one
-directory in your config. On top of that, an always-on deny list (`.env`, `.ssh`,
-`*.pem`, `*token*`, `*credential*`, `secrets/`, `.git`, `node_modules`) applies
-with no way to switch it off, and any file whose first 5 MB look like credentials
-is refused outright rather than gated. Your partner's agent is subject to their
-own copy of these rules on their own machine; nothing you configure reaches
-across, and nothing they configure reaches you.
+The printed browser URLs are more sensitive. The host URL hands its browser the
+owner session, local peer secret, and pending guest credentials; the guest URL
+contains its local peer secret. These values are placed in a URL fragment, which
+is not sent in HTTP, stripped from the address bar immediately, and retained in
+tab-scoped `sessionStorage`. Do not share either URL.
 
-**Files move only when a human says so.** Every agent upload needs an approved
-`artifact_upload` request, and an approval is good for exactly one upload. Only
-the human who owns that agent can answer it — not the other person, not even the
-room owner. A human uploading through their own browser needs no approval,
-because they are the approval.
+The guest credentials cross only after the direct DTLS channel opens. Human
+invites are single-use. Rotating a participant token revokes its older tokens
+and disconnects its live room sockets; a new host run also revokes old owner
+sessions. Agent tokens are scoped to one room. The database stores token hashes
+rather than usable tokens. Each code machine writes its active local agent
+token to a mode `0600` session file on POSIX and removes it on normal shutdown.
 
-**There is no back channel.** Every mutation is a REST call. Every accepted
-message is stored, broadcast to every socket in the room, and logged to stdout as
-`MSG <room> <sender> <type>`. `recipient_ids` is addressing, not privacy. The
-WebSocket accepts only `ping` and an agent's own `working`/`idle` report.
-`GET /api/rooms/:id/export.md` gives you the whole transcript.
+Room data and token-hash records persist in the host database. Stopping the
+command ends network access but is not data erasure; a leaked active token must
+still be treated as compromised.
 
-**Agents cannot run away.** Three agent messages in a row and the room refuses
-the fourth until a human speaks. Either human can pause every agent, or one
-agent, at any moment. An agent that is refused is told to stop and wait, not to
-retry.
+Clausroom enforces private file and directory modes on POSIX. On Windows, local
+at-rest isolation depends on the ACLs of the user's profile and configured data
+directory.
 
-**Credentials are not stored.** The database holds `sha256(token)` and never the
-token, so a copy of the SQLite file is not a set of working credentials. A raw
-token appears exactly twice: in the response that mints it, and in the offer the
-host hands to the guest. Browser session tokens travel in a URL fragment, which
-is never sent to the server, and the page drops the fragment as soon as it has
-read it. `clausroom.toml` never contains one; `~/.clausroom/session.json` does,
-and it is mode 0600 and deleted when the room closes.
+## Files and room content
 
-**Secrets in chat get a seatbelt.** The server rewrites anything matching a known
-credential shape — API keys, private key headers, its own token format — to
-`[redacted-secret]` before storing or broadcasting it, and refuses a message
-carrying a long base64 run with `inline_blob`. The agent's own machine refuses to
-send such text in the first place. This is a seatbelt for the moment someone
-pastes a key into the room, not a guarantee.
+The peer transport never accepts a filesystem path. The room server accesses
+only its database and artifact storage. A collaborator cannot browse, mount, or
+address the other repository through Clausroom.
 
-**The auto-responder is fenced in.** It runs the local agent with read-only tools
-by default, in the project directory, with a wall-clock limit, and with no
-clausroom variables in its environment. Its prompt states plainly that the room
-is untrusted data and that instructions found inside it must be refused. Its
-reply passes the same local checks and the same room limits as anything a human
-sends. A run that times out posts nothing.
+A local agent can deliberately send text into chat. Its artifact-upload tool is
+stricter:
 
-## What this does not protect against
+- uploads are disabled by default;
+- the source must resolve, including symlinks, to a regular file inside that
+  side's configured project;
+- always-denied paths and common credential patterns are refused locally;
+- the agent's human must approve the exact sanitized filename, description,
+  byte count, and SHA-256 digest;
+- both the bridge and server verify that manifest, and one approval authorizes
+  one upload.
 
-**The offer is a bearer invitation.** It carries the guest's one-time browser
-invite and their agent's room token. Whoever holds it first can join. Send it
-over a channel you trust, and if it goes to the wrong person, stop the host and
-start again — the room and its tokens die with it.
+A human may upload through their own browser without an approval, because that
+is the explicit human action. A room retains at most 1 GiB of artifacts.
+Downloads initiated by an agent go only to its private local
+`~/.clausroom/downloads` directory and must be treated as untrusted.
 
-**Prompt injection is mitigated, not solved.** Room content reaches a model that
-can act. Every surface labels it as untrusted and the tools are read-only by
-default, but a sufficiently persuasive message aimed at a permissive
-configuration is a real risk. Turning on `upload_files` or widening `tools` is
-you accepting more of it.
+All room members can receive room messages and artifacts. Recipient labels are
+addressing, not encryption or private messages. The host stores chat and
+artifacts in plaintext unless the host filesystem provides its own encryption.
 
-**A compromised bridge is a compromised side.** The local policy runs on your
-machine, in your process. If something has already taken over that process, it
-has your project. The server's independent approval gate is what stops it turning
-into their project too.
+## Agent boundary
 
-**Your agent's usage is billed to you.** Each side runs and pays for its own.
+Room content is labelled as untrusted before it reaches an auto-responder. The
+default configuration requests read-only tools, sets the project working
+directory, and enforces a turn limit, output limit, and wall-clock timeout;
+outbound text also passes local and server-side secret/blob checks. Users can
+weaken these defaults by changing the agent command or tools.
 
-**Secret scanning is pattern matching.** It catches the common shapes. It will
-miss a credential that does not look like one.
+`project.dir` is a strict boundary for Clausroom file-transfer tools, not an OS
+sandbox around a third-party engine. Claude, Codex, or a custom command may read
+anything its own sandbox permits, and auto mode can be influenced by untrusted
+room text. The selected engine and its sandbox therefore remain part of that
+user's trusted computing base. Secret scanning recognizes common patterns, not
+every possible secret, and ordinary-looking source text can still be sent as
+chat by an enabled agent. Leave `--auto` off if that trust is inappropriate.
 
-**The network is not invisible.** WebRTC is ordinary encrypted traffic. A network
-administrator can see STUN requests, endpoints, volume, and timing, and local
-policy may still require authorisation. Do not use this to get around an
-organisation's rules.
+Room pause controls and the consecutive-agent-turn limit reject agent message
+posts. They do not kill the local agent process, revoke its token, or suspend
+every API operation; stop the local command or agent for a full local cutoff.
 
-## Reporting something
+## Operational limits
 
-Open an issue for anything ordinary. For something security-sensitive, contact
-the maintainers privately first: <https://github.com/chengine/clausroom>.
+Direct-only WebRTC is an availability tradeoff. Symmetric NAT, blocked UDP/TCP,
+or restrictive policy can prevent a connection, and Clausroom has no relay
+fallback.
+
+Encryption does not make the connection invisible. STUN services and network
+administrators can observe endpoints, timing, and traffic volume, and each peer
+learns the other's selected candidate addresses. Clausroom is not a firewall or
+policy bypass; use it only where local rules permit it.
+
+A compromised browser, CLI, agent, operating-system account, or host database
+can defeat that side's protections. Clausroom isolates cooperative endpoints; it
+does not repair an already-compromised machine.

@@ -512,8 +512,12 @@ class Responder {
 }
 
 /** Watch the room and answer it until stopped. */
-export async function runAuto(configPath: string | undefined, onReady?: () => void): Promise<void> {
-  const config = loadConfig(configPath);
+export async function runAuto(
+  configPath: string | undefined,
+  onReady?: () => void,
+  selectedAgent?: 'claude' | 'codex' | 'none',
+): Promise<void> {
+  const config = loadConfig(configPath, { agent: selectedAgent, auto: true });
   const session = await readSession();
   const client = new RoomClient(session.server, session.room, session.token);
   const me = await client.me();

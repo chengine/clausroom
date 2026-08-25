@@ -4,16 +4,12 @@
 
 <h1 align="center">clausroom</h1>
 
-A private chatroom where two people and their coding agents work on a problem
-together — without sharing either machine, either repository, or any port.
-
-One person hosts. The other joins with one line of text. Both agents can read
-their own side's project and talk to each other in the room, while both humans
-watch and approve.
+A private chatroom for two people and their coding agents. Each agent stays on
+its own machine and is attached to its own project.
 
 ## Install
 
-Node.js 20 or newer, plus Claude Code or Codex. On both machines:
+Node.js 20.19 or newer, plus Claude Code or Codex. On both code machines:
 
 ```bash
 git clone https://github.com/chengine/clausroom
@@ -21,85 +17,75 @@ cd clausroom
 npm run install:cli
 ```
 
-## Press play
+If a browser will be on a separate laptop, install the CLI there too; it is used
+once to configure that laptop's SSH forward.
 
-Both people do the same two things: edit one file, run one command.
+## Quick start
 
-```bash
-clausroom host        # one of you
-clausroom connect     # the other
-```
-
-The first run writes `clausroom.toml` next to you and tells you where it is.
-Open it, set your name and your project directory, and run the command again:
-
-```toml
-[me]
-name  = "Mikel"
-agent = "claude"          # claude | codex | none
-
-[partner]
-name = "Ada"
-
-[project]
-# The one directory your agent may read. Nothing outside it is reachable.
-dir = "~/work/depth-regularizer"
-```
-
-`clausroom host` prints one long line starting with `CLAUSROOM_PEER_OFFER`.
-Send that line to the other person however you normally talk. They paste it into
-`clausroom connect`, which prints a `CLAUSROOM_PEER_ANSWER` line to send back.
-Paste that into the still-running `host`, and the room opens in both browsers.
-
-There is no deadline on the paste, and a mistyped one just asks again. Neither
-person enters an IP address, a token, or a room id.
-
-## What each side can see
-
-Your agent gets a set of `room_*` tools — read the room, answer with evidence,
-ask a question, share a file. It can read the one directory you named and
-nothing else. Their agent can read theirs. Neither can reach across.
-
-Files never move without a human saying so: an agent that wants to share one
-creates a request, and the person who owns that agent approves it in the browser.
-Every message and every file is in the transcript; there is no side channel.
-
-Turn it up or down in `clausroom.toml`:
-
-```toml
-[agent]
-send_messages = true    # may post text into the room
-upload_files  = false   # may offer a file; you approve each one either way
-auto_reply    = false   # answers messages addressed to it with no human turn
-```
-
-`auto_reply = true` lets your agent answer on its own, with read-only tools, a
-per-answer time limit, and every reply still passing the same checks. The room is
-untrusted input to it, and it is told so.
-
-Every value in that file is used exactly as written. Nothing in it overrides
-anything else, and it never contains a token.
-
-## If you SSH into the machine that hosts
-
-Forward the same port you host on, then run `clausroom host` there:
+Each person changes into the project their agent should use, then runs one
+command:
 
 ```bash
-ssh -L 127.0.0.1:3000:127.0.0.1:3000 you@host-machine
-cd ~/work/depth-regularizer && clausroom host --no-open
+# person hosting the room
+cd ~/work/my-project
+clausroom host --agent codex --auto
+
+# other person, on their own code machine
+cd ~/work/their-project
+clausroom connect --agent claude --auto
 ```
 
-Because the port matches, the URL it prints works as-is on your laptop. Leave the
-SSH session running. The repository and the agent stay on the host machine.
+`--auto` enables automatic replies for that run. Use `--agent none` for a
+human-only side.
 
-## Checking on things
+The first run writes a project-local `clausroom.toml`. That file holds names,
+agent permissions, and the one project directory; it never holds credentials.
 
-```bash
-clausroom check       # is the config valid, and is the room reachable?
-clausroom project     # re-point your agent at the room after editing the config
-```
+The host browser displays an invite. Send it privately. The other browser
+pastes it and displays an answer; send that back to the host browser. A bad
+paste does not stop either command, and there is no copy/paste deadline.
 
-## Details
+Leave both commands and both browser tabs open.
 
-- [How it works](docs/HOW-IT-WORKS.md) — the connection, the wire, the config reference.
-- [Security](docs/SECURITY.md) — what is enforced where, and what is not.
+## If the browser is on another machine
+
+This is common when the project and agent are on a headless machine reached by
+SSH. Clausroom detects SSH, does not try to open a browser remotely, and prints:
+
+1. a private clickable URL; and
+2. one exact `clausroom ssh add ...` command to run once on the laptop.
+
+Leave Clausroom running. On the laptop, run that helper command, then open a
+second terminal and run the printed `ssh -N` command. Keep that SSH connection
+open and click the URL. The helper adds only a loopback `LocalForward`; it stores
+no key, password, or Clausroom token and uses your existing SSH authentication.
+
+The same design covers every layout without another mode:
+
+- two machines: both browsers are local to their agents;
+- three machines: one browser reaches its own agent machine through SSH;
+- four machines: both browsers reach their own agent machines through SSH.
+
+No user ever needs SSH access to the other user's machine.
+
+## Security model
+
+The browsers make the encrypted WebRTC connection. Each browser talks only to a
+loopback Clausroom process on its own side (directly or through its owner's SSH
+forward). The host room server also binds only `127.0.0.1`.
+
+Every peer tunnel is fixed to that room server. A peer frame cannot name another
+host, port, URL, command, or filesystem path. Normal room authentication still
+applies inside the tunnel. Repositories are never served; files cross only as
+explicit room artifacts, and agent uploads require a human approval bound to the
+exact filename, size, and SHA-256 digest.
+
+`project.dir` confines Clausroom transfers; an auto-response engine still has
+whatever read access its own Claude/Codex sandbox permits. Auto mode is opt-in.
+
+STUN discovers direct paths. TURN is refused, so there is no hosted relay and
+some restrictive networks will not connect. WebRTC is encrypted, but its timing
+and endpoints are still visible to network administrators; follow local policy.
+
+More detail: [how it works](docs/HOW-IT-WORKS.md) and
+[security boundaries](docs/SECURITY.md).

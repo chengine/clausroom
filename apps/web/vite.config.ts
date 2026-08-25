@@ -14,6 +14,7 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
+    license: true,
   },
   server: {
     proxy: {

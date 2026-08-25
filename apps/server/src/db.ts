@@ -227,11 +227,25 @@ export class Store {
 
   constructor(dbPath: string) {
     const file = path.resolve(dbPath);
-    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    fs.chmodSync(path.dirname(file), 0o700);
+    for (const sqliteFile of [file, `${file}-wal`, `${file}-shm`]) {
+      try {
+        if (!fs.lstatSync(sqliteFile).isFile()) {
+          throw new Error(`Refusing non-file SQLite path: ${sqliteFile}`);
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+    }
     this.db = new Database(file);
+    fs.chmodSync(file, 0o600);
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
     this.db.exec(SCHEMA);
+    for (const sqliteFile of [file, `${file}-wal`, `${file}-shm`]) {
+      if (fs.existsSync(sqliteFile)) fs.chmodSync(sqliteFile, 0o600);
+    }
   }
 
   /** Prepare once, reuse forever. */
@@ -534,6 +548,13 @@ export class Store {
     ).all(roomId) as ArtifactFile[];
   }
 
+  artifactBytes(roomId: string): number {
+    const row = this.q('SELECT COALESCE(SUM(size_bytes), 0) AS bytes FROM artifacts WHERE room_id = ?').get(
+      roomId,
+    ) as { bytes: number };
+    return row.bytes;
+  }
+
   // --- approvals -----------------------------------------------------------
 
   addApproval(row: Omit<ApprovalRow, 'payload'> & { payload: Record<string, unknown> }): void {
@@ -570,10 +591,12 @@ export class Store {
   }
 
   /** Mark an approval used, so one human "yes" authorizes exactly one upload. */
-  consumeApproval(approvalId: string): void {
-    this.q('UPDATE approvals SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL').run(
-      nowIso(),
-      approvalId,
+  consumeApproval(approvalId: string): boolean {
+    return (
+      this.q('UPDATE approvals SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL').run(
+        nowIso(),
+        approvalId,
+      ).changes === 1
     );
   }
 }
