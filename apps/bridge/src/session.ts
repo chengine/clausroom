@@ -118,28 +118,23 @@ export async function clearSession(): Promise<void> {
  * not own the file, so it patches just that field and never creates one.
  */
 export function saveCursor(messageId: string): void {
-  patchSession((session) =>
-    session.cursor === messageId ? session : { ...session, cursor: messageId },
-  );
+  patchSession({ cursor: messageId });
 }
 
 /** Remember or forget the exact Claude/Codex conversation used by this room. */
 export function saveEngineSession(agent: 'claude' | 'codex', id?: string): void {
-  patchSession((session) => {
-    if (!id) {
-      const { engine_session: _old, ...rest } = session;
-      return rest;
-    }
-    return { ...session, engine_session: { agent, id } };
-  });
+  patchSession({ engine_session: id ? { agent, id } : null });
 }
 
-function patchSession(update: (session: Session) => Session): void {
+function patchSession(
+  patch: Partial<Pick<Session, 'cursor'>> & { engine_session?: Session['engine_session'] | null },
+): void {
   const file = sessionFile();
   try {
     const parsed = SessionSchema.safeParse(JSON.parse(fs.readFileSync(file, 'utf8')) as unknown);
     if (!parsed.success) return;
-    const next = update(parsed.data);
+    const next = { ...parsed.data, ...patch };
+    if (next.engine_session === null) delete next.engine_session;
     fs.writeFileSync(file, `${JSON.stringify(next, null, 2)}\n`, {
       mode: 0o600,
     });

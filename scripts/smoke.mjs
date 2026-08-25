@@ -1582,6 +1582,26 @@ try {
 
   // --- answering on its own ------------------------------------------------
 
+  const askAuto = async (body, label = 'auto answer') => {
+    const asked = ok(
+      await api('POST', `${base}/api/rooms/${room}/messages`, {
+        token: human,
+        json: { message_type: 'human_message', body_markdown: body, recipient_ids: [myAgent.user_id] },
+      }),
+      201,
+      label,
+    );
+    const answer = await humanProbe.waitFor(
+      (frame) =>
+        frame.type === 'message_created' &&
+        frame.message.message_type === 'agent_answer' &&
+        frame.message.reply_to_message_id === asked.message.id,
+      label,
+      120_000,
+    );
+    return { asked, answer };
+  };
+
   await step('the auto-responder answers, and never sees the room token', async () => {
     // The engine echoes the id of the message it was given, so the test can tell
     // which question was answered, and refuses to run if the prompt is missing
@@ -1627,27 +1647,7 @@ try {
     await stdoutLine(auto, 'CLAUSROOM_AUTO_READY');
     await stderrMatch(auto, /starting at the latest message/);
 
-    const asked = ok(
-      await api('POST', `${base}/api/rooms/${room}/messages`, {
-        token: human,
-        json: {
-          message_type: 'human_message',
-          body_markdown: 'Agent, summarise the overflow.',
-          recipient_ids: [myAgent.user_id],
-        },
-      }),
-      201,
-      'ask the agent',
-    );
-
-    const answer = await humanProbe.waitFor(
-      (f) =>
-        f.type === 'message_created' &&
-        f.message.message_type === 'agent_answer' &&
-        f.message.reply_to_message_id === asked.message.id,
-      'auto answer',
-      120_000,
-    );
+    const { asked, answer } = await askAuto('Agent, summarise the overflow.');
     assert.equal(
       answer.message.body_markdown,
       `answered ${asked.message.id}`,
@@ -1705,26 +1705,7 @@ try {
           ? (await fsp.readFile(harnessLog, 'utf8')).trim().split('\n').filter(Boolean).length
           : 0;
         for (let turn = 0; turn < 2; turn += 1) {
-          const asked = ok(
-            await api('POST', `${base}/api/rooms/${room}/messages`, {
-              token: human,
-              json: {
-                message_type: 'human_message',
-                body_markdown: `${agent} continuity ${turn}`,
-                recipient_ids: [myAgent.user_id],
-              },
-            }),
-            201,
-            `ask ${agent}`,
-          );
-          await humanProbe.waitFor(
-            (frame) =>
-              frame.type === 'message_created' &&
-              frame.message.message_type === 'agent_answer' &&
-              frame.message.reply_to_message_id === asked.message.id,
-            `${agent} resumed answer`,
-            20_000,
-          );
+          await askAuto(`${agent} continuity ${turn}`, `${agent} resumed answer`);
         }
         const sessionFile = path.join(hostState, 'session.json');
         const state = JSON.parse(await fsp.readFile(sessionFile, 'utf8'));
@@ -1736,26 +1717,7 @@ try {
           }),
           { mode: 0o600 },
         );
-        const stale = ok(
-          await api('POST', `${base}/api/rooms/${room}/messages`, {
-            token: human,
-            json: {
-              message_type: 'human_message',
-              body_markdown: `${agent} stale continuity`,
-              recipient_ids: [myAgent.user_id],
-            },
-          }),
-          201,
-          `ask ${agent} after a stale session`,
-        );
-        await humanProbe.waitFor(
-          (frame) =>
-            frame.type === 'message_created' &&
-            frame.message.message_type === 'agent_answer' &&
-            frame.message.reply_to_message_id === stale.message.id,
-          `${agent} fresh fallback answer`,
-          20_000,
-        );
+        await askAuto(`${agent} stale continuity`, `${agent} fresh fallback answer`);
         await stop(auto);
         auto = null;
         const calls = (await fsp.readFile(harnessLog, 'utf8'))
