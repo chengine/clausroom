@@ -88,6 +88,10 @@ directory, and enforces a turn limit, output limit, and wall-clock timeout;
 outbound text also passes local and server-side secret/blob checks. Users can
 weaken these defaults by changing the agent command or tools.
 
+Native Claude/Codex auto-response is pinned to the explicit session ID stored
+in the local private runtime file. It never uses `--continue`, `--last`, or an
+interactive picker that could select an unrelated conversation.
+
 `project.dir` is a strict boundary for Clausroom file-transfer tools, not an OS
 sandbox around a third-party engine. Claude, Codex, or a custom command may read
 anything its own sandbox permits, and auto mode can be influenced by untrusted

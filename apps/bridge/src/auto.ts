@@ -11,6 +11,7 @@
  * turn limit the loop waits for a human to speak rather than retrying.
  */
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { StringDecoder } from 'node:string_decoder';
 import { z } from 'zod';
 import { CONFIDENCE, LIMITS, type Confidence, type Message } from '@clausroom/protocol';
@@ -19,7 +20,7 @@ import { ApiError, Feed, RoomClient } from './client.js';
 import { loadConfig, summary, type Config } from './config.js';
 import { addressedTo, all, render, renderAll, since } from './inbox.js';
 import { checkText } from './policy.js';
-import { readSession, saveCursor } from './session.js';
+import { readSession, saveCursor, saveEngineSession } from './session.js';
 import { log, message as errorText, sleep } from './util.js';
 
 /** How long to sit on the feed before re-checking over REST anyway. */
@@ -50,6 +51,7 @@ const ClaudeOutput = z
     subtype: z.string().optional(),
     total_cost_usd: z.number().optional(),
     num_turns: z.number().int().optional(),
+    session_id: z.string().uuid().optional(),
   })
   .passthrough();
 
@@ -108,15 +110,27 @@ function extractConfidence(reply: string): { body: string; confidence?: Confiden
   return body.length > 0 ? { body, confidence: level } : { body: trimmed, confidence: level };
 }
 
-/** The command that answers, from the config. */
-function engineCommand(config: Config): { command: string; args: string[] } {
+interface EngineCommand {
+  command: string;
+  args: string[];
+  agent?: 'claude' | 'codex';
+  sessionId?: string;
+  resuming?: boolean;
+}
+
+/** The command that answers, pinned to one harness conversation when native. */
+function engineCommand(config: Config, resumeId?: string): EngineCommand {
   const { agent } = config;
   if (agent.command.length > 0) {
     return { command: agent.command[0] as string, args: agent.command.slice(1) };
   }
   if (config.me.agent === 'claude') {
+    const sessionId = resumeId ?? randomUUID();
     return {
       command: 'claude',
+      agent: 'claude',
+      sessionId,
+      resuming: Boolean(resumeId),
       args: [
         '-p',
         '--output-format',
@@ -129,11 +143,15 @@ function engineCommand(config: Config): { command: string; args: string[] } {
         '--max-turns',
         String(ENGINE_TURNS),
         ...(agent.model ? ['--model', agent.model] : []),
+        ...(resumeId ? ['--resume', sessionId] : ['--session-id', sessionId]),
       ],
     };
   }
   return {
     command: 'codex',
+    agent: 'codex',
+    sessionId: resumeId,
+    resuming: Boolean(resumeId),
     args: [
       '--ask-for-approval',
       'never',
@@ -141,10 +159,11 @@ function engineCommand(config: Config): { command: string; args: string[] } {
       // Ignoring user config keeps ambient MCP servers out of an unattended run
       // while still using the operator's Codex login.
       '--ignore-user-config',
-      '--ephemeral',
       '--sandbox',
       'read-only',
+      '--json',
       ...(agent.model ? ['--model', agent.model] : []),
+      ...(resumeId ? ['resume', resumeId, '-'] : ['-']),
     ],
   };
 }
@@ -246,9 +265,21 @@ function runProcess(
   });
 }
 
-/** One engine run. Never throws: every failure becomes an Outcome. */
-async function runEngine(config: Config, prompt: string, signal: AbortSignal): Promise<Outcome> {
-  const { command, args } = engineCommand(config);
+interface EngineAttempt {
+  outcome: Outcome;
+  sessionId?: string;
+  staleResume?: boolean;
+}
+
+/** One process invocation. Never throws: every failure becomes an Outcome. */
+async function runEngineOnce(
+  config: Config,
+  prompt: string,
+  signal: AbortSignal,
+  resumeId?: string,
+): Promise<EngineAttempt> {
+  const invocation = engineCommand(config, resumeId);
+  const { command, args } = invocation;
   const result = await runProcess(command, args, {
     cwd: config.project.dir,
     input: prompt,
@@ -263,38 +294,98 @@ async function runEngine(config: Config, prompt: string, signal: AbortSignal): P
 
   if (result.status === 'killed') {
     log(`[auto] the engine was stopped after ${config.agent.timeout_seconds}s; posting nothing.`);
-    return { kind: 'killed' };
+    return { outcome: { kind: 'killed' } };
   }
   if (result.status === 'unstartable') {
     let reason = `could not run ${command}: ${result.error ?? 'unknown error'}`;
     if (process.platform === 'win32' && /ENOENT|EINVAL/.test(result.error ?? '')) {
       reason += ` — on Windows npm installs ${command} as a .cmd shim that cannot be spawned directly`;
     }
-    return { kind: 'failure', reason };
+    return { outcome: { kind: 'failure', reason } };
   }
 
-  // Only the claude CLI is asked for JSON; anything else answers in plain text.
-  if (config.agent.command.length === 0 && config.me.agent === 'claude') {
+  if (invocation.agent === 'claude') {
     const parsed = ClaudeOutput.safeParse(safeJson(result.stdout));
     const output = parsed.success ? parsed.data : null;
     if (output) {
       log(`[auto] engine: $${output.total_cost_usd ?? '?'}, ${output.num_turns ?? '?'} turn(s)`);
     }
-    if (result.code !== 0) {
-      return { kind: 'failure', reason: output?.subtype ?? `exit code ${result.code}` };
+    const sessionId = output?.session_id ?? (result.code === 0 ? invocation.sessionId : undefined);
+    if (result.code !== 0 || output?.is_error) {
+      return {
+        outcome: { kind: 'failure', reason: output?.subtype ?? `exit code ${result.code}` },
+        ...(sessionId ? { sessionId } : {}),
+        staleResume: invocation.resuming && missingSession(`${result.stdout}\n${result.stderr}`),
+      };
     }
-    if (!output) return { kind: 'failure', reason: 'the engine did not print JSON' };
-    if (output.is_error) return { kind: 'failure', reason: output.subtype ?? 'unknown error' };
+    if (!output) return { outcome: { kind: 'failure', reason: 'the engine did not print JSON' } };
     const reply = (output.result ?? '').trim();
-    return reply ? { kind: 'reply', reply } : { kind: 'failure', reason: 'the engine said nothing' };
+    return {
+      outcome: reply
+        ? { kind: 'reply', reply }
+        : { kind: 'failure', reason: 'the engine said nothing' },
+      ...(sessionId ? { sessionId } : {}),
+    };
+  }
+
+  if (invocation.agent === 'codex') {
+    const output = codexOutput(result.stdout);
+    if (result.code !== 0) {
+      const tail = result.stderr.trim().split('\n').at(-1) ?? '';
+      return {
+        outcome: {
+          kind: 'failure',
+          reason: `exit code ${result.code}${tail ? ` (${tail.slice(0, 200)})` : ''}`,
+        },
+        ...(output.sessionId ? { sessionId: output.sessionId } : {}),
+        staleResume:
+          invocation.resuming &&
+          !output.sessionId &&
+          missingSession(`${result.stdout}\n${result.stderr}`),
+      };
+    }
+    return {
+      outcome: output.reply
+        ? { kind: 'reply', reply: output.reply }
+        : { kind: 'failure', reason: 'the engine said nothing' },
+      ...(output.sessionId ? { sessionId: output.sessionId } : {}),
+    };
   }
 
   if (result.code !== 0) {
     const tail = result.stderr.trim().split('\n').at(-1) ?? '';
-    return { kind: 'failure', reason: `exit code ${result.code}${tail ? ` (${tail.slice(0, 200)})` : ''}` };
+    return {
+      outcome: {
+        kind: 'failure',
+        reason: `exit code ${result.code}${tail ? ` (${tail.slice(0, 200)})` : ''}`,
+      },
+    };
   }
   const reply = result.stdout.trim();
-  return reply ? { kind: 'reply', reply } : { kind: 'failure', reason: 'the engine said nothing' };
+  return {
+    outcome: reply
+      ? { kind: 'reply', reply }
+      : { kind: 'failure', reason: 'the engine said nothing' },
+  };
+}
+
+/** Continue exactly this room's harness session, or create one if none exists. */
+async function runEngine(config: Config, prompt: string, signal: AbortSignal): Promise<Outcome> {
+  const native = config.agent.command.length === 0 ? config.me.agent : 'none';
+  if (native === 'none') return (await runEngineOnce(config, prompt, signal)).outcome;
+
+  const saved = (await readSession()).engine_session;
+  const resumeId = saved?.agent === native ? saved.id : undefined;
+  if (saved && !resumeId) saveEngineSession(native);
+
+  let attempt = await runEngineOnce(config, prompt, signal, resumeId);
+  if (resumeId && attempt.staleResume && !signal.aborted) {
+    log(`[auto] ${native} session ${resumeId} is unavailable; starting a fresh session.`);
+    saveEngineSession(native);
+    attempt = await runEngineOnce(config, prompt, signal);
+  }
+  if (attempt.sessionId) saveEngineSession(native, attempt.sessionId);
+  return attempt.outcome;
 }
 
 function safeJson(text: string): unknown {
@@ -303,6 +394,30 @@ function safeJson(text: string): unknown {
   } catch {
     return null;
   }
+}
+
+function missingSession(text: string): boolean {
+  return /(?:session|conversation).*(?:not found|does not exist|unknown|invalid|unavailable)|(?:no|cannot find|failed to load).*(?:session|conversation)/i.test(
+    text,
+  );
+}
+
+function codexOutput(text: string): { reply?: string; sessionId?: string } {
+  let reply: string | undefined;
+  let sessionId: string | undefined;
+  for (const line of text.split(/\r?\n/)) {
+    const event = safeJson(line) as Record<string, unknown> | null;
+    if (!event || typeof event !== 'object') continue;
+    if (event.type === 'thread.started' && typeof event.thread_id === 'string') {
+      const id = z.string().uuid().safeParse(event.thread_id);
+      if (id.success) sessionId = id.data;
+    }
+    const item = event.item as Record<string, unknown> | undefined;
+    if (event.type === 'item.completed' && item?.type === 'agent_message' && typeof item.text === 'string') {
+      reply = item.text.trim();
+    }
+  }
+  return { ...(reply ? { reply } : {}), ...(sessionId ? { sessionId } : {}) };
 }
 
 // ---------------------------------------------------------------------------

@@ -27,6 +27,10 @@ const SessionSchema = z.object({
   agent_name: z.string().min(1).max(100),
   /** Newest message this agent has read, or null for "nothing yet". */
   cursor: z.string().nullable(),
+  /** Exact local harness conversation used by auto-reply; never "latest". */
+  engine_session: z
+    .object({ agent: z.enum(['claude', 'codex']), id: z.string().uuid() })
+    .optional(),
 });
 
 export type Session = z.infer<typeof SessionSchema>;
@@ -114,15 +118,33 @@ export async function clearSession(): Promise<void> {
  * not own the file, so it patches just that field and never creates one.
  */
 export function saveCursor(messageId: string): void {
+  patchSession((session) =>
+    session.cursor === messageId ? session : { ...session, cursor: messageId },
+  );
+}
+
+/** Remember or forget the exact Claude/Codex conversation used by this room. */
+export function saveEngineSession(agent: 'claude' | 'codex', id?: string): void {
+  patchSession((session) => {
+    if (!id) {
+      const { engine_session: _old, ...rest } = session;
+      return rest;
+    }
+    return { ...session, engine_session: { agent, id } };
+  });
+}
+
+function patchSession(update: (session: Session) => Session): void {
   const file = sessionFile();
   try {
     const parsed = SessionSchema.safeParse(JSON.parse(fs.readFileSync(file, 'utf8')) as unknown);
-    if (!parsed.success || parsed.data.cursor === messageId) return;
-    fs.writeFileSync(file, `${JSON.stringify({ ...parsed.data, cursor: messageId }, null, 2)}\n`, {
+    if (!parsed.success) return;
+    const next = update(parsed.data);
+    fs.writeFileSync(file, `${JSON.stringify(next, null, 2)}\n`, {
       mode: 0o600,
     });
   } catch {
-    /* a cursor is an optimisation, never a reason to fail a tool call */
+    /* Runtime continuity is useful, but never a reason to stop the room. */
   }
 }
 

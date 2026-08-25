@@ -92,5 +92,10 @@ only its own live agent session in `~/.clausroom/session.json`; that file is
 removed when its command exits. The project is selected by `project.dir` in the
 project-local `clausroom.toml` (or an explicitly selected config).
 
+Auto-response records the selected harness and its explicit session ID in that
+same private file. Later turns resume exactly that Claude/Codex session. If the
+harness reports that the ID no longer exists, Clausroom clears it and retries
+once with a fresh session; it never uses a resume-latest option.
+
 The room API remains ordinary authenticated REST plus a push WebSocket. The
 browser peer layer changes how those bytes reach the host, not their meaning.

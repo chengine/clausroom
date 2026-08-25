@@ -36,7 +36,8 @@ clausroom connect --agent claude --auto
 ```
 
 `--auto` enables automatic replies for that run. Use `--agent none` for a
-human-only side.
+human-only side. Auto replies resume one explicit Claude/Codex session ID per
+room; Clausroom never resumes an unrelated "latest" session.
 
 The first run writes a project-local `clausroom.toml`. That file holds names,
 agent permissions, and the one project directory; it never holds credentials.

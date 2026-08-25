@@ -513,8 +513,10 @@ const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'clausroom-smoke-'));
 const project = path.join(tmp, 'project');
 const dataDir = path.join(tmp, 'data');
 const engine = path.join(tmp, 'engine.mjs');
+const fakeBin = path.join(tmp, 'bin');
+const harnessLog = path.join(tmp, 'harness.jsonl');
 const [serverPort, guestPort] = await freePorts(2);
-await fsp.mkdir(project, { recursive: true });
+await Promise.all([fsp.mkdir(project, { recursive: true }), fsp.mkdir(fakeBin, { recursive: true })]);
 
 function configFile(name, body) {
   const file = path.join(tmp, name);
@@ -1657,6 +1659,122 @@ try {
       'the confidence line should not remain in the body',
     );
   });
+
+  if (process.platform !== 'win32') {
+    await step('Claude and Codex resume only their exact room session', async () => {
+      await stop(auto);
+      auto = null;
+      const harness = [
+        '#!/usr/bin/env node',
+        "import { appendFileSync, readFileSync } from 'node:fs';",
+        "import { basename } from 'node:path';",
+        "const prompt = readFileSync(0, 'utf8');",
+        "const agent = basename(process.argv[1]);",
+        'const args = process.argv.slice(2);',
+        "if (!prompt.includes('UNTRUSTED DATA')) process.exit(4);",
+        "const ids = [...prompt.matchAll(/\\[(msg_[0-9a-f]{24})\\]/g)].map((m) => m[1]);",
+        "const resumeAt = args.indexOf(agent === 'claude' ? '--resume' : 'resume');",
+        "const freshAt = args.indexOf('--session-id');",
+        "const id = resumeAt >= 0 ? args[resumeAt + 1] : agent === 'claude' ? args[freshAt + 1] : '0199a213-81c0-7800-8aa1-bbab2a035a53';",
+        "appendFileSync(process.env.HARNESS_LOG, JSON.stringify({ agent, args, id, resumed: resumeAt >= 0 }) + '\\n');",
+        "if (id === '00000000-0000-4000-8000-000000000001') { process.stderr.write('session not found\\n'); process.exit(2); }",
+        "const reply = `answered ${ids.at(-1)}\\n\\nConfidence: high`;",
+        "if (agent === 'claude') process.stdout.write(JSON.stringify({ result: reply, session_id: id, is_error: false }));",
+        "else process.stdout.write([JSON.stringify({ type: 'thread.started', thread_id: id }), JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: reply } })].join('\\n'));",
+      ].join('\n');
+      for (const name of ['claude', 'codex']) {
+        const file = path.join(fakeBin, name);
+        await fsp.writeFile(file, harness, { mode: 0o755 });
+        await fsp.chmod(file, 0o755);
+      }
+
+      for (const agent of ['claude', 'codex']) {
+        const config = configFile(
+          `${agent}-resume.toml`,
+          toml({ me: 'Mikel', partner: 'Ada', agent, autoReply: true }),
+        );
+        auto = launch(['auto', '--config', config], `${agent}-resume`, {
+          HOME: path.join(tmp, 'home-host'),
+          CLAUSROOM_STATE_DIR: hostState,
+          HARNESS_LOG: harnessLog,
+          PATH: `${fakeBin}${path.delimiter}${process.env.PATH ?? ''}`,
+        });
+        await stdoutLine(auto, 'CLAUSROOM_AUTO_READY');
+        await stderrMatch(auto, /starting at the latest message|resuming after/);
+        const callsBefore = fs.existsSync(harnessLog)
+          ? (await fsp.readFile(harnessLog, 'utf8')).trim().split('\n').filter(Boolean).length
+          : 0;
+        for (let turn = 0; turn < 2; turn += 1) {
+          const asked = ok(
+            await api('POST', `${base}/api/rooms/${room}/messages`, {
+              token: human,
+              json: {
+                message_type: 'human_message',
+                body_markdown: `${agent} continuity ${turn}`,
+                recipient_ids: [myAgent.user_id],
+              },
+            }),
+            201,
+            `ask ${agent}`,
+          );
+          await humanProbe.waitFor(
+            (frame) =>
+              frame.type === 'message_created' &&
+              frame.message.message_type === 'agent_answer' &&
+              frame.message.reply_to_message_id === asked.message.id,
+            `${agent} resumed answer`,
+            20_000,
+          );
+        }
+        const sessionFile = path.join(hostState, 'session.json');
+        const state = JSON.parse(await fsp.readFile(sessionFile, 'utf8'));
+        await fsp.writeFile(
+          sessionFile,
+          JSON.stringify({
+            ...state,
+            engine_session: { agent, id: '00000000-0000-4000-8000-000000000001' },
+          }),
+          { mode: 0o600 },
+        );
+        const stale = ok(
+          await api('POST', `${base}/api/rooms/${room}/messages`, {
+            token: human,
+            json: {
+              message_type: 'human_message',
+              body_markdown: `${agent} stale continuity`,
+              recipient_ids: [myAgent.user_id],
+            },
+          }),
+          201,
+          `ask ${agent} after a stale session`,
+        );
+        await humanProbe.waitFor(
+          (frame) =>
+            frame.type === 'message_created' &&
+            frame.message.message_type === 'agent_answer' &&
+            frame.message.reply_to_message_id === stale.message.id,
+          `${agent} fresh fallback answer`,
+          20_000,
+        );
+        await stop(auto);
+        auto = null;
+        const calls = (await fsp.readFile(harnessLog, 'utf8'))
+          .trim()
+          .split('\n')
+          .filter(Boolean)
+          .slice(callsBefore)
+          .map((line) => JSON.parse(line));
+        assert.equal(calls.length, 4);
+        assert.equal(calls[0].resumed, false);
+        assert.equal(calls[1].resumed, true);
+        assert.equal(calls[1].id, calls[0].id, `${agent} must resume the exact captured id`);
+        assert.equal(calls[2].id, '00000000-0000-4000-8000-000000000001');
+        assert.equal(calls[2].resumed, true);
+        assert.equal(calls[3].resumed, false, `${agent} must recover fresh from a stale id`);
+        assert.ok(!calls[1].args.includes('--continue'), 'bare latest-session continuation is forbidden');
+      }
+    });
+  }
 
   // --- the shipped CLI -----------------------------------------------------
 
