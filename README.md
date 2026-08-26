@@ -17,6 +17,9 @@ cd clausroom
 npm run install:cli
 ```
 
+No skills, `settings.json`, or manual MCP setup is needed; `host` and `connect`
+attach the selected agent automatically. The agent CLI must already be signed in.
+
 If a browser will be on a separate laptop, install the CLI there too; it is used
 once to configure that laptop's SSH forward.
 
@@ -41,6 +44,8 @@ room; Clausroom never resumes an unrelated "latest" session.
 
 The first run writes a project-local `clausroom.toml`. That file holds names,
 agent permissions, and the one project directory; it never holds credentials.
+Auto mode defaults to Claude Opus 5 or GPT-5.6 Sol at low effort; change `model`
+and `effort` under `[agent]` to override them.
 
 The host browser displays an invite. Send it privately. The other browser
 pastes it and displays an answer; send that back to the host browser. A bad

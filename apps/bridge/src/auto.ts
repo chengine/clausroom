@@ -133,7 +133,10 @@ function engineCommand(config: Config, resumeId?: string) {
         agent.tools.join(','),
         '--max-turns',
         String(ENGINE_TURNS),
-        ...(agent.model ? ['--model', agent.model] : []),
+        '--model',
+        agent.model || 'claude-opus-5',
+        '--effort',
+        agent.effort,
         ...(resumeId ? ['--resume', sessionId] : ['--session-id', sessionId]),
       ],
     };
@@ -142,6 +145,8 @@ function engineCommand(config: Config, resumeId?: string) {
     command: 'codex',
     sessionId: resumeId,
     args: [
+      '--config',
+      `model_reasoning_effort=${JSON.stringify(agent.effort)}`,
       '--ask-for-approval',
       'never',
       'exec',
@@ -151,7 +156,8 @@ function engineCommand(config: Config, resumeId?: string) {
       '--sandbox',
       'read-only',
       '--json',
-      ...(agent.model ? ['--model', agent.model] : []),
+      '--model',
+      agent.model || 'gpt-5.6-sol',
       ...(resumeId ? ['resume', resumeId, '-'] : ['-']),
     ],
   };

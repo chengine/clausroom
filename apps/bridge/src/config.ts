@@ -46,6 +46,7 @@ const Schema = z.object({
     auto_reply: z.boolean(),
     tools: z.array(z.string().min(1)),
     model: z.string(),
+    effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).default('low'),
     timeout_seconds: z.number().int().positive(),
     context_messages: z.number().int().positive(),
     command: z.array(z.string().min(1)),
@@ -103,7 +104,8 @@ auto_reply      = false   # answers messages addressed to it with no human turn
 
 # Read only when auto_reply = true.
 tools            = ["Read", "Grep", "Glob"]   # read-only on purpose
-model            = ""     # "" = whatever the agent defaults to
+model            = ""     # "" = Claude Opus 5 or GPT-5.6 Sol
+effort           = "low"  # low | medium | high | xhigh | max
 timeout_seconds  = 300    # a run over this is killed and nothing is posted
 context_messages = 30     # recent room messages included in the prompt
 command          = []     # non-empty = run this argv instead of the agent CLI

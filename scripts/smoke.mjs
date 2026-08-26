@@ -1734,6 +1734,8 @@ try {
         assert.equal(calls[2].resumed, true);
         assert.equal(calls[3].resumed, false, `${agent} must recover fresh from a stale id`);
         assert.ok(!calls[1].args.includes('--continue'), 'bare latest-session continuation is forbidden');
+        assert.ok(calls[0].args.includes(agent === 'claude' ? 'claude-opus-5' : 'gpt-5.6-sol'));
+        assert.ok(calls[0].args.includes(agent === 'claude' ? '--effort' : 'model_reasoning_effort="low"'));
       }
     });
   }
