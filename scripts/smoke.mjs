@@ -1569,6 +1569,13 @@ try {
     assert.match(guestSession.token, /^arbt_[0-9a-f]{32}$/);
     assert.notEqual(guestSession.token, session.token, 'each side has its own agent token');
 
+    const guestProbe = await Probe.open(
+      `${guestBase.replace('http', 'ws')}/ws?room_id=${room}&token=${guestHuman}`,
+    );
+    probes.push(guestProbe);
+    const hello = await guestProbe.waitFor((f) => f.type === 'hello', 'tunnelled guest hello');
+    assert.equal(hello.room.id, room);
+
     assert.deepEqual(ok(await api('GET', `${guestBase}/healthz`), 200, 'tunnelled healthz'), { ok: true });
     const detail = ok(
       await api('GET', `${guestBase}/api/rooms/${room}`, { token: guestHuman }),
@@ -1589,6 +1596,19 @@ try {
     await humanProbe.waitFor(
       (f) => f.type === 'message_created' && f.message.id === said.message.id,
       'tunnelled broadcast',
+      20_000,
+    );
+    const answered = ok(
+      await api('POST', `${base}/api/rooms/${room}/messages`, {
+        token: human,
+        json: { message_type: 'human_message', body_markdown: 'Host reply through the tunnel.' },
+      }),
+      201,
+      'host reply',
+    );
+    await guestProbe.waitFor(
+      (f) => f.type === 'message_created' && f.message.id === answered.message.id,
+      'tunnelled guest receive',
       20_000,
     );
     browserRelay.healthy();

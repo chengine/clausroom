@@ -36,11 +36,19 @@ export interface LaunchOptions {
   open?: boolean;
   agent?: 'claude' | 'codex' | 'none';
   auto?: boolean;
+  resume?: string;
 }
 
 function launchConfig(options: LaunchOptions): Config {
-  return loadConfig(options.config, { agent: options.agent, auto: options.auto });
+  const config = loadConfig(options.config, { agent: options.agent, auto: options.auto });
+  if (options.resume && (!config.agent.auto_reply || config.me.agent === 'none')) {
+    throw new Error('--resume requires --auto and --agent claude or codex');
+  }
+  return config;
 }
+
+const resumed = (config: Config, id?: string) =>
+  id ? { engine_session: { agent: config.me.agent as 'claude' | 'codex', id } } : {};
 
 // ---------------------------------------------------------------------------
 // The room server, as a child process
@@ -402,6 +410,7 @@ export async function runHost(options: LaunchOptions): Promise<void> {
       me: config.me.name,
       agent_name: `${config.me.name}'s agent`,
       cursor: null,
+      ...resumed(config, options.resume),
     }));
 
     // Credentials leave this browser only after the DTLS-authenticated link is
@@ -462,6 +471,7 @@ export async function runConnect(options: LaunchOptions): Promise<void> {
             me: invite.human,
             agent_name: invite.agent,
             cursor: null,
+            ...resumed(config, options.resume),
           }).then((started) => {
             finish = started.finish;
           });

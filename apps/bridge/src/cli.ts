@@ -51,11 +51,17 @@ const agent = (value: string): 'claude' | 'codex' | 'none' => {
   throw new InvalidArgumentError('must be claude, codex, or none');
 };
 
+const sessionId = (value: string): string => {
+  if (/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value)) return value;
+  throw new InvalidArgumentError('must be a Claude or Codex session UUID');
+};
+
 interface StartOptions {
   config?: string;
   open?: boolean;
   agent?: 'claude' | 'codex' | 'none';
   auto?: boolean;
+  resume?: string;
 }
 
 const startOptions = (opts: StartOptions): StartOptions => {
@@ -65,6 +71,7 @@ const startOptions = (opts: StartOptions): StartOptions => {
     ...(opts.open === false ? { open: false } : {}),
     ...(opts.agent ? { agent: opts.agent } : {}),
     ...(opts.auto ? { auto: true } : {}),
+    ...(opts.resume ? { resume: opts.resume } : {}),
   };
 };
 
@@ -74,6 +81,7 @@ program
   .option('-c, --config <path>', 'clausroom.toml to use')
   .option('--agent <agent>', 'coding agent: claude, codex, or none', agent)
   .option('--auto', 'let the selected agent answer addressed messages')
+  .option('--resume <session-id>', 'resume this exact agent session', sessionId)
   .option('--no-open', 'do not open the browser')
   .action(async (opts: StartOptions) => {
     await attempt('host', async () => {
@@ -88,6 +96,7 @@ program
   .option('-c, --config <path>', 'clausroom.toml to use')
   .option('--agent <agent>', 'coding agent: claude, codex, or none', agent)
   .option('--auto', 'let the selected agent answer addressed messages')
+  .option('--resume <session-id>', 'resume this exact agent session', sessionId)
   .option('--no-open', 'do not open the browser')
   .action(async (opts: StartOptions) => {
     await attempt('connect', async () => {

@@ -38,6 +38,12 @@ cd ~/work/their-project
 clausroom connect --agent claude --auto
 ```
 
+To continue an existing harness conversation, add its exact session ID:
+
+```bash
+clausroom host --agent codex --auto --resume <session-id>
+```
+
 `--auto` enables automatic replies for that run. Use `--agent none` for a
 human-only side. Auto replies resume one explicit Claude/Codex session ID per
 room; Clausroom never resumes an unrelated "latest" session.
