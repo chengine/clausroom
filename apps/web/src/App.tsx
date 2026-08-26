@@ -1,20 +1,24 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useContext, useEffect, useState } from 'react';
 import type { Room, User } from '@clausroom/protocol';
 import * as api from './api.js';
 import { Login } from './components/Login.js';
 import { RoomsHome } from './components/RoomsHome.js';
 import { RoomView } from './components/RoomView.js';
 import { Wordmark } from './components/Wordmark.js';
+import { PeerRoom } from './components/PeerSetup.js';
 import { consumeSessionFragment, getSessionToken, setSessionToken } from './storage.js';
 
 type View = { name: 'login' } | { name: 'rooms' } | { name: 'room'; roomId: string };
 
 export function App() {
+  const peerRoom = useContext(PeerRoom);
   const [token, setToken] = useState<string | null>(
     () => consumeSessionFragment() ?? getSessionToken(),
   );
   const [me, setMe] = useState<User | null>(null);
-  const [view, setView] = useState<View>(() => (token ? { name: 'rooms' } : { name: 'login' }));
+  const [view, setView] = useState<View>(() =>
+    token ? (peerRoom ? { name: 'room', roomId: peerRoom } : { name: 'rooms' }) : { name: 'login' },
+  );
   const [bootError, setBootError] = useState<string | null>(null);
   const [bootAttempt, setBootAttempt] = useState(0);
   // Shown on the login screen after an involuntary sign-out (session expiry).
@@ -113,7 +117,7 @@ export function App() {
         token={token}
         roomId={view.roomId}
         me={me}
-        onBack={() => setView({ name: 'rooms' })}
+        onBack={peerRoom ? undefined : () => setView({ name: 'rooms' })}
         onUnauthorized={handleUnauthorized}
       />
     );

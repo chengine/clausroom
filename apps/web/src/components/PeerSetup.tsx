@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { createContext, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { PEER, type PeerRoomInvite } from '@clausroom/protocol';
 import * as api from '../api.js';
 import { consumeSessionFragment, getSessionToken, setSessionToken } from '../storage.js';
@@ -11,6 +11,8 @@ import {
 } from '../peer.js';
 import { Wordmark } from './Wordmark.js';
 import { trace, traceText } from '../trace.js';
+
+export const PeerRoom = createContext<string | null>(null);
 
 function copy(value: string): void {
   void navigator.clipboard.writeText(value);
@@ -115,7 +117,7 @@ function HostSetup({
     };
   }, [bootstrap, generation]);
 
-  if (connected) return children;
+  if (connected) return <PeerRoom.Provider value={bootstrap.room.room}>{children}</PeerRoom.Provider>;
   const submit = (event: FormEvent) => {
     event.preventDefault();
     const current = peer.current;
@@ -174,7 +176,7 @@ function GuestSetup({
   const [offer, setOffer] = useState('');
   const [answer, setAnswer] = useState('');
   const [status, setStatus] = useState('Connecting to the local Clausroom command…');
-  const [connected, setConnected] = useState(false);
+  const [connected, setConnected] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   const stopPeer = (message: string, clearOffer = false) => {
@@ -185,7 +187,7 @@ function GuestSetup({
     setAnswer('');
     if (clearOffer) setOffer('');
     setBusy(false);
-    setConnected(false);
+    setConnected(null);
     setStatus(message);
   };
 
@@ -216,7 +218,7 @@ function GuestSetup({
           value.invite === room.current?.invite
         ) {
           setSessionToken(value.token);
-          if (peer.current.confirm()) setConnected(true);
+          if (peer.current.confirm() && room.current) setConnected(room.current.room);
         } else if (value.type === 'error' && typeof value.message === 'string') {
           peer.current?.confirm(value.message);
           setStatus(value.message);
@@ -254,7 +256,7 @@ function GuestSetup({
     [],
   );
 
-  if (connected) return children;
+  if (connected) return <PeerRoom.Provider value={connected}>{children}</PeerRoom.Provider>;
   const join = (event: FormEvent) => {
     event.preventDefault();
     if (!offer.trim() || busy) return;

@@ -23,7 +23,7 @@ interface RoomViewProps {
   token: string;
   roomId: string;
   me: User;
-  onBack: () => void;
+  onBack?: () => void;
   onUnauthorized: (err?: unknown) => void;
 }
 
@@ -207,9 +207,9 @@ export function RoomView({ token, roomId, me, onBack, onUnauthorized }: RoomView
       <div className="room-error">
         <div className="card room-error__card">
           <p className="room-error__text">{state.loadError}</p>
-          <button type="button" className="btn btn--primary" onClick={onBack}>
+          {onBack && <button type="button" className="btn btn--primary" onClick={onBack}>
             <ArrowLeftIcon size={15} /> Back to rooms
-          </button>
+          </button>}
         </div>
       </div>
     );
@@ -218,9 +218,9 @@ export function RoomView({ token, roomId, me, onBack, onUnauthorized }: RoomView
   return (
     <div className="room-screen">
       <header className="room-header card">
-        <button type="button" className="btn btn--ghost btn--icon" onClick={onBack} aria-label="Back to rooms">
+        {onBack && <button type="button" className="btn btn--ghost btn--icon" onClick={onBack} aria-label="Back to rooms">
           <ArrowLeftIcon size={17} />
-        </button>
+        </button>}
         <div className="room-header__title">
           <h1 className="room-header__name">{state.room?.name ?? 'Loading…'}</h1>
           <span className={`conn-pill conn-pill--${state.conn}`}>
