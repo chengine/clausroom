@@ -375,9 +375,10 @@ export function RoomView({ token, roomId, me, onBack, onUnauthorized }: RoomView
           colorOf={colorOf}
           nameOf={nameOf}
           turnRun={turnRun}
-          maxTurns={state.agentTurns ?? LIMITS.AGENT_TURNS}
+          maxTurns={state.room?.agent_turn_limit ?? LIMITS.AGENT_TURNS}
           approvals={state.approvals}
           onUpdateSummary={actions.updateSummary}
+          onSetTurnLimit={actions.updateTurnLimit}
           onContinue={() => actions.sendMessage(CONTINUE_MESSAGE_BODY, [])}
           onSetParticipantPaused={actions.setParticipantPaused}
           onRespondApproval={actions.respondApproval}

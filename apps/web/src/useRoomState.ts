@@ -29,8 +29,6 @@ export interface RoomState {
   loadError: string | null;
   room: Room | null;
   myRole: Role | null;
-  /** The room's turn limit; null until the first load lands. */
-  agentTurns: number | null;
   participants: Participant[];
   onlineUserIds: string[];
   /** Users (agents, in practice) currently reporting 'working' activity. */
@@ -46,7 +44,6 @@ const initialState: RoomState = {
   loadError: null,
   room: null,
   myRole: null,
-  agentTurns: null,
   participants: [],
   onlineUserIds: [],
   workingUserIds: [],
@@ -67,7 +64,6 @@ type Action =
       room: Room;
       participants: Participant[];
       myRole: Role;
-      agentTurns: number;
     }
   | { type: 'load_error'; error: string }
   | { type: 'room'; room: Room }
@@ -93,7 +89,6 @@ function reducer(state: RoomState, action: Action): RoomState {
         room: action.room,
         participants: action.participants,
         myRole: action.myRole,
-        agentTurns: action.agentTurns,
       };
     case 'load_error':
       return { ...state, loading: false, loadError: action.error };
@@ -174,6 +169,7 @@ export interface RoomActions {
     replyToMessageId?: string,
   ) => Promise<void>;
   updateSummary: (summaryMarkdown: string | null) => Promise<void>;
+  updateTurnLimit: (limit: number) => Promise<void>;
   setAllAgentsPaused: (paused: boolean) => Promise<void>;
   setParticipantPaused: (userId: string, paused: boolean) => Promise<void>;
   respondApproval: (approvalId: string, decision: 'approved' | 'denied') => Promise<void>;
@@ -331,7 +327,6 @@ export function useRoomState(
           room: detail.room,
           participants: detail.participants,
           myRole: detail.my_role,
-          agentTurns: detail.agent_turns,
         });
         const [approvals, artifacts] = await Promise.all([
           api.getApprovals(token, roomId),
@@ -381,6 +376,11 @@ export function useRoomState(
       const room = await guard(api.updateSummary(token, roomId, summaryMarkdown));
       dispatch({ type: 'room', room });
     },
+    [guard, token, roomId],
+  );
+
+  const updateTurnLimit = useCallback(
+    async (limit: number) => dispatch({ type: 'room', room: await guard(api.updateTurnLimit(token, roomId, limit)) }),
     [guard, token, roomId],
   );
 
@@ -437,6 +437,7 @@ export function useRoomState(
     actions: {
       sendMessage,
       updateSummary,
+      updateTurnLimit,
       setAllAgentsPaused,
       setParticipantPaused,
       respondApproval,

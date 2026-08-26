@@ -20,6 +20,7 @@ import {
   PauseRequestSchema,
   PostMessageRequestSchema,
   RespondApprovalRequestSchema,
+  TurnLimitRequestSchema,
   UpdateSummaryRequestSchema,
   genId,
   newToken,
@@ -60,6 +61,12 @@ function privateDir(dir: string): void {
 export function routes(store: Store, hub: Hub, dataDir: string): Router {
   const api = Router();
   const room = [auth(store), inRoom(store)];
+  const changedRoom = (id: string) => {
+    const updated = store.room(id);
+    if (!updated) throw noRoom();
+    hub.send(id, { type: 'room_updated', room: updated });
+    return updated;
+  };
 
   // --- auth ----------------------------------------------------------------
 
@@ -125,7 +132,7 @@ export function routes(store: Store, hub: Hub, dataDir: string): Router {
         room: r,
         participants: store.participants(r.id),
         my_role: participant.role,
-        agent_turns: LIMITS.AGENT_TURNS,
+        agent_turns: r.agent_turn_limit,
       });
     }),
   );
@@ -201,10 +208,7 @@ export function routes(store: Store, hub: Hub, dataDir: string): Router {
 
       if (body.target === 'all_agents') {
         store.pauseAgents(r.id, body.paused);
-        const updated = store.room(r.id);
-        if (!updated) throw noRoom();
-        hub.send(r.id, { type: 'room_updated', room: updated });
-        res.json({ room: updated });
+        res.json({ room: changedRoom(r.id) });
         return;
       }
       if (!store.participant(r.id, body.target)) {
@@ -215,6 +219,18 @@ export function routes(store: Store, hub: Hub, dataDir: string): Router {
       if (!participant) throw fail('not_found', 'No such participant in this room.');
       hub.send(r.id, { type: 'participant_updated', participant });
       res.json({ participant });
+    }),
+  );
+
+  api.put(
+    '/rooms/:id/turn-limit',
+    room,
+    handler((req, res) => {
+      const { room: r, me } = roomOf(req);
+      if (me.user.kind !== 'human') throw fail('forbidden', 'Only a human can change the turn limit.');
+      const { agent_turn_limit } = parse(TurnLimitRequestSchema, req.body);
+      store.setTurnLimit(r.id, agent_turn_limit);
+      res.json({ room: changedRoom(r.id) });
     }),
   );
 
@@ -231,9 +247,7 @@ export function routes(store: Store, hub: Hub, dataDir: string): Router {
         summary_markdown === null ? null : redact(summary_markdown),
         me.user.id,
       );
-      const updated = store.room(r.id);
-      if (!updated) throw noRoom();
-      hub.send(r.id, { type: 'room_updated', room: updated });
+      const updated = changedRoom(r.id);
       announce(store, hub, r.id, `${me.user.display_name} updated the room summary.`);
       res.json({ room: updated });
     }),
@@ -300,7 +314,7 @@ export function routes(store: Store, hub: Hub, dataDir: string): Router {
           throw fail('participant_paused', 'You are paused. Wait for your human to resume you.');
         }
         const run = store.agentRun(r.id);
-        if (run >= LIMITS.AGENT_TURNS) {
+        if (run >= r.agent_turn_limit) {
           throw fail(
             'turn_limit',
             `Agent turn limit reached (${run} agent messages in a row). Stop and wait for a human reply.`,

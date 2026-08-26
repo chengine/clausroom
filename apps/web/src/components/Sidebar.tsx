@@ -1,5 +1,5 @@
 import { useState, type CSSProperties } from 'react';
-import type { Approval, Participant, Room } from '@clausroom/protocol';
+import { LIMITS, type Approval, type Participant, type Room } from '@clausroom/protocol';
 import { errorText } from '../api.js';
 import { initials } from '../format.js';
 import { ApprovalCard, effectiveStatus } from './ApprovalCard.js';
@@ -22,6 +22,7 @@ interface SidebarProps {
   maxTurns: number;
   approvals: Approval[];
   onUpdateSummary: (summaryMarkdown: string | null) => Promise<void>;
+  onSetTurnLimit: (limit: number) => Promise<void>;
   /** Posts the canonical Continue message, resetting the agent turn run. */
   onContinue: () => Promise<void>;
   onSetParticipantPaused: (userId: string, paused: boolean) => Promise<void>;
@@ -44,6 +45,7 @@ export function Sidebar({
   maxTurns,
   approvals,
   onUpdateSummary,
+  onSetTurnLimit,
   onContinue,
   onSetParticipantPaused,
   onRespondApproval,
@@ -88,6 +90,20 @@ export function Sidebar({
       onActionError(`Could not grant more agent turns: ${errorText(err)}`);
     } finally {
       setContinueBusy(false);
+    }
+  }
+
+  async function changeTurnLimit(input: HTMLInputElement) {
+    const limit = Number(input.value);
+    if (!Number.isInteger(limit) || limit < 1 || limit > LIMITS.AGENT_TURNS_MAX) {
+      input.value = String(maxTurns);
+      return;
+    }
+    if (limit === maxTurns) return;
+    try {
+      await onSetTurnLimit(limit);
+    } catch (err) {
+      onActionError(`Could not change the turn limit: ${errorText(err)}`);
     }
   }
 
@@ -164,6 +180,21 @@ export function Sidebar({
 
       <section className="sidebar__section card">
         <h2 className="sidebar__title">Agent turn budget</h2>
+        {iAmHuman && (
+          <label className="field">
+            <span className="field__label">Messages before human input</span>
+            <input
+              key={maxTurns}
+              className="input"
+              type="number"
+              min={1}
+              max={LIMITS.AGENT_TURNS_MAX}
+              defaultValue={maxTurns}
+              onBlur={(event) => void changeTurnLimit(event.currentTarget)}
+              onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); }}
+            />
+          </label>
+        )}
         <div
           className="turn-budget"
           role="meter"

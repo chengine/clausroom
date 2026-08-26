@@ -155,6 +155,12 @@ export function updateSummary(
   }).then((r) => r.room);
 }
 
+export function updateTurnLimit(token: string, roomId: string, agentTurnLimit: number): Promise<Room> {
+  return call(RoomReply, `/api/rooms/${roomId}/turn-limit`, {
+    method: 'PUT', token, body: { agent_turn_limit: agentTurnLimit },
+  }).then((r) => r.room);
+}
+
 export function getMessages(
   token: string,
   roomId: string,

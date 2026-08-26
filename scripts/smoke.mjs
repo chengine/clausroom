@@ -843,7 +843,33 @@ try {
     await humanProbe.waitFor((f) => f.type === 'pong', 'pong');
   });
 
-  await step('the agent turn limit holds, and a human resets it', async () => {
+  await step('humans share and enforce the live agent turn limit', async () => {
+    const changed = ok(
+      await api('PUT', `${base}/api/rooms/${room}/turn-limit`, {
+        token: human,
+        json: { agent_turn_limit: 2 },
+      }),
+      200,
+      'change turn limit',
+    );
+    assert.equal(changed.room.agent_turn_limit, 2);
+    await humanProbe.waitFor(
+      (f) => f.type === 'room_updated' && f.room.agent_turn_limit === 2,
+      'shared turn limit',
+    );
+    assert.equal(
+      ok(await api('GET', `${base}/api/rooms/${room}`, { token: human }), 200, 'saved turn limit').agent_turns,
+      2,
+    );
+    refused(
+      await api('PUT', `${base}/api/rooms/${room}/turn-limit`, {
+        token: session.token,
+        json: { agent_turn_limit: 3 },
+      }),
+      403,
+      'forbidden',
+      'agent changes turn limit',
+    );
     // Earlier steps left agent messages at the tail; start from a clean run.
     ok(
       await api('POST', `${base}/api/rooms/${room}/messages`, {
@@ -853,7 +879,7 @@ try {
       201,
       'reset the run',
     );
-    for (let i = 0; i < 3; i += 1) {
+    for (let i = 0; i < 2; i += 1) {
       ok(
         await api('POST', `${base}/api/rooms/${room}/messages`, {
           token: session.token,
@@ -887,6 +913,14 @@ try {
       }),
       201,
       'agent may speak again',
+    );
+    ok(
+      await api('PUT', `${base}/api/rooms/${room}/turn-limit`, {
+        token: human,
+        json: { agent_turn_limit: 3 },
+      }),
+      200,
+      'restore turn limit',
     );
   });
 

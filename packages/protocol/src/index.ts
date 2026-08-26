@@ -36,7 +36,7 @@ export function sha256Hex(input: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Limits (fixed; there is nothing to tune for a two-person room)
+// Limits
 // ---------------------------------------------------------------------------
 
 export const LIMITS = {
@@ -52,6 +52,7 @@ export const LIMITS = {
   PAGE_MAX: 500,
   /** Consecutive agent messages allowed before a human must speak. */
   AGENT_TURNS: 3,
+  AGENT_TURNS_MAX: 100,
   /** Hard ceiling on one upload, whatever the local config allows. */
   UPLOAD_BYTES: 104857600,
   /** Aggregate artifact bytes retained by one room. */
@@ -377,6 +378,8 @@ export const RoomSchema = z.object({
   created_at: z.string(),
   /** True while every agent in the room is blocked from sending. */
   agents_paused: z.boolean(),
+  /** Shared consecutive-agent-message budget, adjustable by either human. */
+  agent_turn_limit: z.number().int().min(1).max(LIMITS.AGENT_TURNS_MAX),
   /** Pinned shared whiteboard; null when unset. */
   summary_markdown: z.string().nullable(),
   summary_updated_by: z.string().nullable(),
@@ -477,6 +480,10 @@ export const PauseRequestSchema = z.object({
   /** 'all_agents' or one participant's user id. */
   target: z.string().min(1),
   paused: z.boolean(),
+});
+
+export const TurnLimitRequestSchema = z.object({
+  agent_turn_limit: z.number().int().min(1).max(LIMITS.AGENT_TURNS_MAX),
 });
 
 export const RespondApprovalRequestSchema = z.object({

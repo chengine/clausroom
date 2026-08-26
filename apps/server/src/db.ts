@@ -7,7 +7,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
-import { genId } from '@clausroom/protocol';
+import { genId, LIMITS } from '@clausroom/protocol';
 import type {
   Approval,
   ApprovalStatus,
@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS rooms (
   name               TEXT NOT NULL,
   created_at         TEXT NOT NULL,
   agents_paused      INTEGER NOT NULL DEFAULT 0,
+  agent_turn_limit   INTEGER NOT NULL DEFAULT ${LIMITS.AGENT_TURNS},
   summary_markdown   TEXT,
   summary_updated_by TEXT REFERENCES users(id),
   summary_updated_at TEXT
@@ -243,6 +244,9 @@ export class Store {
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
     this.db.exec(SCHEMA);
+    if (!this.db.prepare("SELECT 1 FROM pragma_table_info('rooms') WHERE name = 'agent_turn_limit'").get()) {
+      this.db.exec(`ALTER TABLE rooms ADD COLUMN agent_turn_limit INTEGER NOT NULL DEFAULT ${LIMITS.AGENT_TURNS}`);
+    }
     for (const sqliteFile of [file, `${file}-wal`, `${file}-shm`]) {
       if (fs.existsSync(sqliteFile)) fs.chmodSync(sqliteFile, 0o600);
     }
@@ -338,14 +342,15 @@ export class Store {
       name,
       created_at: nowIso(),
       agents_paused: false,
+      agent_turn_limit: LIMITS.AGENT_TURNS,
       summary_markdown: null,
       summary_updated_by: null,
       summary_updated_at: null,
     };
     this.q(
-      `INSERT INTO rooms (id, name, created_at, agents_paused)
-       VALUES (@id, @name, @created_at, 0)`,
-    ).run({ id: room.id, name: room.name, created_at: room.created_at });
+      `INSERT INTO rooms (id, name, created_at, agents_paused, agent_turn_limit)
+       VALUES (@id, @name, @created_at, 0, @agent_turn_limit)`,
+    ).run(room);
     return room;
   }
 
@@ -371,6 +376,10 @@ export class Store {
 
   pauseAgents(roomId: string, paused: boolean): void {
     this.q('UPDATE rooms SET agents_paused = ? WHERE id = ?').run(paused ? 1 : 0, roomId);
+  }
+
+  setTurnLimit(roomId: string, limit: number): void {
+    this.q('UPDATE rooms SET agent_turn_limit = ? WHERE id = ?').run(limit, roomId);
   }
 
   setSummary(roomId: string, summary: string | null, byUserId: string): void {
