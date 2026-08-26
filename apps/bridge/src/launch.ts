@@ -22,7 +22,6 @@ import { AUTO_READY } from './auto.js';
 import { loadConfig, type Config } from './config.js';
 import { startGuestRelay, type GuestRelay } from './peer.js';
 import { clearSession, readSession, writeSession, type Session } from './session.js';
-import { formatSshAddCommand } from './ssh.js';
 import {
   detectSshSession,
   forwardSignals,
@@ -301,20 +300,14 @@ async function showBrowser(
   if (ssh) {
     log('[clausroom] SSH detected: open the room on the computer in front of you.');
     if (ssh.serverAddress && ssh.serverPort) {
-      const rawName = os.hostname().split('.')[0]?.toLowerCase() ?? 'machine';
-      const name = /^[a-z0-9][a-z0-9._-]{0,62}$/.test(rawName) ? rawName : 'machine';
       const parsedUrl = new URL(serverUrl);
       const port = Number(parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80));
-      const command = formatSshAddCommand({
-        name,
-        host: ssh.serverAddress,
-        user: os.userInfo().username,
-        sshPort: ssh.serverPort,
-        clausroomPort: port,
-      });
-      log('[clausroom] if this URL is not forwarded, run this once on that computer:');
-      log(`  ${command}`);
-      log(`[clausroom] then, without stopping Clausroom, start the forward: ssh -N clausroom-${name}`);
+      const destination = `${os.userInfo().username}@${ssh.serverAddress}`;
+      log('[clausroom] on that computer, run this and leave it open:');
+      log(
+        `  clausroom ssh setup ${destination} --ssh-port ${ssh.serverPort} --clausroom-port ${port}`,
+      );
+      log('[clausroom] use your usual SSH destination in place of the one shown if it differs.');
     } else {
       log('[clausroom] this SSH session did not expose enough information to print an exact forward command.');
     }

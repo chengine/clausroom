@@ -10,8 +10,8 @@ agent installation.
 - The host room server and guest connector bind only `127.0.0.1`; Clausroom
   exposes no public HTTP, SSH, or filesystem port.
 - A browser on another machine reaches only its owner's loopback service through
-  an existing SSH connection. The generated `LocalForward` binds both ends to
-  loopback and contains no key, password, or Clausroom token.
+  its normal SSH destination. The managed forward binds both ends to loopback;
+  Clausroom receives no SSH credentials or Clausroom token.
 - Local browser control and tunnel WebSockets require a random 256-bit secret
   plus the exact loopback `Host` and `Origin`.
 - The guest classifies a connection by its first request as room traffic or

@@ -570,35 +570,36 @@ const probes = [];
 try {
   assert.ok(fs.existsSync(CLI), `${CLI} is missing — run npm run build first`);
 
-  await step('SSH browser forwarding is safe and idempotent', async () => {
+  await step('SSH setup extends the existing destination once', async () => {
     const home = path.join(tmp, 'ssh-home');
     const sshDir = path.join(home, '.ssh');
     await fsp.mkdir(sshDir, { recursive: true, mode: 0o700 });
+    const config = path.join(sshDir, 'config');
+    const original = 'Host signed-cluster\n  IdentityFile ~/.ssh/signed-cert\n';
+    await fsp.writeFile(config, original, { mode: 0o640 });
+    if (!POSIX) return;
+    const sshLog = path.join(tmp, 'ssh-argv.json');
+    const fakeSsh = path.join(fakeBin, 'ssh');
     await fsp.writeFile(
-      path.join(sshDir, 'config'),
-      '# existing settings\n\nUser fallback\nPort 22\nHost old\n    HostName old.example\n',
-      { mode: 0o640 },
+      fakeSsh,
+      `#!/bin/sh\nprintf '%s\\n' "$@" > ${JSON.stringify(sshLog)}\n`,
+      { mode: 0o755 },
     );
-    const args = [
-      CLI, 'ssh', 'add', 'code', '--host', '171.64.160.63', '--user', 'admin',
-      '--ssh-port', '22', '--clausroom-port', '3000',
-    ];
-    const run = () => spawnSync(process.execPath, args, { env: { ...process.env, HOME: home } });
+    const run = () => spawnSync(
+      process.execPath,
+      [CLI, 'ssh', 'setup', 'signed-cluster', '--ssh-port', '2222', '--clausroom-port', '3000'],
+      { env: { ...process.env, HOME: home, PATH: `${fakeBin}${path.delimiter}${process.env.PATH ?? ''}` } },
+    );
+    const first = run();
+    assert.equal(first.status, 0, first.stderr?.toString());
+    assert.deepEqual((await fsp.readFile(sshLog, 'utf8')).trim().split('\n'), [
+      '-N', '-p', '2222', 'signed-cluster',
+    ]);
+    const main = await fsp.readFile(config, 'utf8');
+    assert.match(main, /Host signed-cluster\n    LocalForward 127\.0\.0\.1:3000 127\.0\.0\.1:3000/);
+    assert.ok(main.endsWith(original));
     assert.equal(run().status, 0);
-    const main = await fsp.readFile(path.join(sshDir, 'config'), 'utf8');
-    const managedPath = path.join(sshDir, 'clausroom', 'config');
-    const managed = await fsp.readFile(managedPath, 'utf8');
-    assert.equal(run().status, 0);
-    assert.equal(await fsp.readFile(path.join(sshDir, 'config'), 'utf8'), main);
-    assert.equal(await fsp.readFile(managedPath, 'utf8'), managed);
-    assert.equal(main.split('\n').find((line) => line.trim() && !line.trim().startsWith('#')), 'Include ~/.ssh/clausroom/config');
-    assert.match(managed, /LocalForward 127\.0\.0\.1:3000 127\.0\.0\.1:3000/);
-    assert.ok(managed.endsWith('Host *\n'));
-    if (POSIX) {
-      assert.equal((await fsp.stat(path.join(sshDir, 'config'))).mode & 0o777, 0o640);
-      assert.equal((await fsp.stat(managedPath)).mode & 0o777, 0o600);
-      assert.equal((await fsp.stat(path.dirname(managedPath))).mode & 0o777, 0o700);
-    }
+    assert.equal(await fsp.readFile(config, 'utf8'), main);
   });
 
   // --- the host's room ------------------------------------------------------

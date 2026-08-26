@@ -128,26 +128,17 @@ const ssh = program
   .description('Manage a loopback-only browser forward to a Clausroom machine.');
 
 ssh
-  .command('add')
-  .description('Add or update one Clausroom-managed SSH destination.')
-  .argument('<name>', 'short name for the code machine')
-  .requiredOption('--host <host>', 'address of the code machine')
-  .requiredOption('--user <user>', 'SSH user on the code machine')
+  .command('setup')
+  .description('Add Clausroom to an existing SSH destination and start it now.')
+  .argument('<destination>', 'existing SSH hostname or user@hostname')
   .option('--ssh-port <port>', 'SSH server port', port, 22)
   .requiredOption('--clausroom-port <port>', 'loopback port Clausroom listens on', port)
-  .action(
-    async (
-      name: string,
-      opts: { host: string; user: string; sshPort: number; clausroomPort: number },
-    ) => {
-      await attempt('SSH setup', async () => {
-        const { addSshForward } = await import('./ssh.js');
-        const result = addSshForward({ name, ...opts });
-        log(`[clausroom] configured ${result.alias} in ${result.config}`);
-        log(`[clausroom] start the browser forward with: ssh -N ${result.alias}`);
-      });
-    },
-  );
+  .action(async (destination: string, opts: { sshPort: number; clausroomPort: number }) => {
+    await attempt('SSH forward', async () => {
+      const { setupSshForward } = await import('./ssh.js');
+      await setupSshForward(destination, opts.sshPort, opts.clausroomPort);
+    });
+  });
 
 program
   .command('mcp', { hidden: true })

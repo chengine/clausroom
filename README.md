@@ -20,8 +20,8 @@ npm run install:cli
 No skills, `settings.json`, or manual MCP setup is needed; `host` and `connect`
 attach the selected agent automatically. The agent CLI must already be signed in.
 
-If a browser will be on a separate laptop, install the CLI there too; it is used
-once to configure that laptop's SSH forward.
+If a browser will be on a separate laptop, install the CLI there too; it sets up
+that laptop's SSH forward once.
 
 ## Quick start
 
@@ -59,12 +59,12 @@ This is common when the project and agent are on a headless machine reached by
 SSH. Clausroom detects SSH, does not try to open a browser remotely, and prints:
 
 1. a private clickable URL; and
-2. one exact `clausroom ssh add ...` command to run once on the laptop.
+2. one `clausroom ssh setup ...` command to run on the laptop.
 
-Leave Clausroom running. On the laptop, run that helper command, then open a
-second terminal and run the printed `ssh -N` command. Keep that SSH connection
-open and click the URL. The helper adds only a loopback `LocalForward`; it stores
-no key, password, or Clausroom token and uses your existing SSH authentication.
+Leave Clausroom running. On the laptop, replace the command's destination with
+the hostname or `user@hostname` you normally use, run it, and click the URL. It
+starts the forward for this room and adds it to that existing SSH destination
+for future sessions. It creates no alias or credentials.
 
 The same design covers every layout without another mode:
 

@@ -11,7 +11,6 @@ const BOOTSTRAP_KEY = 'clausroom.peer_bootstrap';
 const OFFER = 'CLAUSROOM-OFFER-2.';
 const ANSWER = 'CLAUSROOM-ANSWER-2.';
 const GATHER_MS = 10_000;
-const CONNECT_MS = 5 * 60_000;
 const CLOSE_MS = 5_000;
 
 interface Signal {
@@ -183,12 +182,14 @@ function gathered(pc: RTCPeerConnection): Promise<void> {
   });
 }
 
-function opened(pc: RTCPeerConnection, channel: RTCDataChannel, timeout?: number): Promise<void> {
+function opened(
+  pc: RTCPeerConnection,
+  channel: RTCDataChannel,
+  failEarly = true,
+): Promise<void> {
   if (channel.readyState === 'open') return Promise.resolve();
   return new Promise((resolve, reject) => {
-    let timer: ReturnType<typeof setTimeout> | undefined;
     const finish = (error?: Error) => {
-      if (timer) clearTimeout(timer);
       channel.removeEventListener('open', ok);
       channel.removeEventListener('error', fail);
       channel.removeEventListener('close', fail);
@@ -199,7 +200,7 @@ function opened(pc: RTCPeerConnection, channel: RTCDataChannel, timeout?: number
     const ok = () => finish();
     const fail = () => finish(new Error('The peer connection failed.'));
     const state = () => {
-      if (pc.connectionState === 'failed') {
+      if (failEarly && pc.connectionState === 'failed') {
         finish(new Error('ICE found no usable direct path. Check the VPN or firewall and try again.'));
       } else if (pc.connectionState === 'closed') fail();
     };
@@ -208,9 +209,8 @@ function opened(pc: RTCPeerConnection, channel: RTCDataChannel, timeout?: number
     channel.addEventListener('close', fail);
     pc.addEventListener('connectionstatechange', state);
     if (channel.readyState === 'closed') return fail();
-    if (pc.connectionState === 'failed' || pc.connectionState === 'closed') return state();
-    if (timeout) {
-      timer = setTimeout(() => finish(new Error('No direct path opened within five minutes.')), timeout);
+    if ((failEarly && pc.connectionState === 'failed') || pc.connectionState === 'closed') {
+      return state();
     }
   });
 }
@@ -408,7 +408,6 @@ export async function hostPeer(
   let applied = false;
   let ending = false;
   let welcomed = false;
-  let readyTimer: ReturnType<typeof setTimeout> | undefined;
   let readyResolve!: () => void;
   let readyReject!: (error: Error) => void;
   const ready = new Promise<void>((resolve, reject) => {
@@ -427,7 +426,6 @@ export async function hostPeer(
     ending = true;
     authorized = false;
     readyReject(new Error('The peer connection was closed.'));
-    if (readyTimer) clearTimeout(readyTimer);
     for (const tunnel of tunnels) tunnel.close();
     control.close();
     pc.close();
@@ -490,23 +488,16 @@ export async function hostPeer(
       if (applied) throw new Error('That answer was already applied.');
       await pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp });
       applied = true;
-      await opened(pc, control, CONNECT_MS);
+      await opened(pc, control);
       const path = await directPath(pc);
       authorized = true;
       welcomed = true;
       control.send(JSON.stringify({ type: 'welcome', session, room: bootstrap.room }));
-      readyTimer = setTimeout(
-        () => readyReject(new Error('The guest connector was not ready within five minutes.')),
-        CONNECT_MS,
-      );
       try {
         await ready;
       } catch (error) {
         shutdown();
         throw error;
-      } finally {
-        clearTimeout(readyTimer);
-        readyTimer = undefined;
       }
       return path;
     },
@@ -546,7 +537,9 @@ export async function guestPeer(
   pc.ondatachannel = ({ channel }) => {
     if (channel.label !== PEER.CONTROL_CHANNEL || control) return channel.close();
     control = channel;
-    prove = opened(pc, channel).then(() => directPath(pc));
+    // Manual signaling may report `failed` before the host pastes our answer.
+    // Keep the proven Crazy Camels behavior: wait for the channel.
+    prove = opened(pc, channel, false).then(() => directPath(pc));
     channel.addEventListener('close', () =>
       failed('The direct connection closed. Ask the host for a fresh invite.'),
     );
@@ -574,7 +567,7 @@ export async function guestPeer(
     };
   };
   pc.addEventListener('connectionstatechange', () => {
-    if (pc.connectionState === 'failed') {
+    if (pc.connectionState === 'failed' && control?.readyState === 'open') {
       failed('The direct connection was lost. Ask the host for a fresh invite.');
     }
   });

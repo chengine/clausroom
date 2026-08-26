@@ -26,9 +26,8 @@ session identifier, not room credentials.
 private browser URL, and stays in the foreground. The guest browser pastes the
 offer, creates an answer, and displays it for return to the host browser.
 
-There is no copy/paste deadline. After the host applies an answer, it allows up
-to five minutes for a direct path to open. A bad code or failed path leaves both
-commands running; the users can start again with a fresh invite.
+There is no copy/paste or application connection deadline. A bad code or failed
+path leaves both commands running; the users can start again with a fresh invite.
 
 Once both browsers prove that the selected ICE path is direct, the host browser
 sends the guest's one-time human invite and room-scoped agent token over the
@@ -74,8 +73,9 @@ machine, where the person uses the room. Those may be the same machine.
 - Four machines: both browsers are separate from their code machines.
 
 When a browser is separate, that user forwards their own Clausroom loopback
-port through an SSH connection they already control. `clausroom ssh add` writes
-the loopback-only `LocalForward` and an SSH alias; it creates no credentials.
+port through an SSH connection they already control. `clausroom ssh setup`
+adds the loopback-only forward to the user's normal destination, starts it for
+the current room, and creates no alias or credentials.
 The browser still opens `127.0.0.1`, and WebRTC is still browser-to-browser.
 Neither user needs SSH access to the other user's machine.
 
