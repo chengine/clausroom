@@ -36,9 +36,9 @@ can impersonate a peer. The codes also reveal candidate network addresses.
 
 The printed browser URLs are more sensitive. The host URL hands its browser the
 owner session, local peer secret, and pending guest credentials; the guest URL
-contains its local peer secret. These values are placed in a URL fragment, which
-is not sent in HTTP, stripped from the address bar immediately, and retained in
-tab-scoped `sessionStorage`. Do not share either URL.
+contains its local peer secret. These values remain in a URL fragment, which is
+never sent in HTTP and durably keeps reloads inside the private peer lifecycle.
+Do not share either URL.
 
 The guest credentials cross only after the direct DTLS channel opens. Human
 invites are single-use. Rotating a participant token revokes its older tokens

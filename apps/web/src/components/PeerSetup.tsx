@@ -3,7 +3,7 @@ import { PEER, type PeerRoomInvite } from '@clausroom/protocol';
 import * as api from '../api.js';
 import { consumeSessionFragment, getSessionToken, setSessionToken } from '../storage.js';
 import {
-  consumePeerBootstrap,
+  readPeerBootstrap,
   guestPeer,
   hostPeer,
   type GuestPeer,
@@ -26,7 +26,7 @@ function controlUrl(secret: string): string {
 }
 
 export function PeerSetup({ children }: { children: ReactNode }) {
-  const [bootstrap] = useState(consumePeerBootstrap);
+  const [bootstrap] = useState(readPeerBootstrap);
   // On the host this strips and stores the human token before the setup screen
   // spends any time gathering ICE or waiting for a pasted answer.
   useState(() => consumeSessionFragment());
@@ -56,7 +56,7 @@ function HostSetup({
   bootstrap,
   children,
 }: {
-  bootstrap: Extract<ReturnType<typeof consumePeerBootstrap>, { role: 'host' }>;
+  bootstrap: Extract<ReturnType<typeof readPeerBootstrap>, { role: 'host' }>;
   children: ReactNode;
 }) {
   const peer = useRef<HostPeer | null>(null);
@@ -166,7 +166,7 @@ function GuestSetup({
   bootstrap,
   children,
 }: {
-  bootstrap: Extract<ReturnType<typeof consumePeerBootstrap>, { role: 'guest' }>;
+  bootstrap: Extract<ReturnType<typeof readPeerBootstrap>, { role: 'guest' }>;
   children: ReactNode;
 }) {
   const peer = useRef<GuestPeer | null>(null);

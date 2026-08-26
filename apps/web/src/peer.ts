@@ -8,7 +8,6 @@ import {
 } from '@clausroom/protocol';
 import { trace } from './trace.js';
 
-const BOOTSTRAP_KEY = 'clausroom.peer_bootstrap';
 const OFFER = 'CLAUSROOM-OFFER-2.';
 const ANSWER = 'CLAUSROOM-ANSWER-2.';
 const HEARTBEAT_MS = 5_000;
@@ -24,14 +23,6 @@ interface Signal {
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
-
-function forgetBootstrap(): void {
-  try {
-    sessionStorage.removeItem(BOOTSTRAP_KEY);
-  } catch {
-    /* storage is optional */
-  }
-}
 
 function toBase64(bytes: Uint8Array): string {
   let raw = '';
@@ -70,45 +61,16 @@ async function transform(bytes: Uint8Array, stream: GenericTransformStream): Pro
   return output;
 }
 
-/** Read, validate, persist for reload, and immediately strip the private fragment. */
-export function consumePeerBootstrap(): PeerBootstrap | 'invalid' | null {
+/** The fragment owns this page for the CLI session and reconstructs it on reload. */
+export function readPeerBootstrap(): PeerBootstrap | 'invalid' | null {
   const params = new URLSearchParams(location.hash.replace(/^#/, ''));
-  const encoded = params.get('clausroom-peer');
-  if (params.has('clausroom-peer')) {
-    params.delete('clausroom-peer');
-    history.replaceState(
-      null,
-      '',
-      `${location.pathname}${location.search}${params.size ? `#${params}` : ''}`,
-    );
-    const parsed = (() => {
-      try {
-        return PeerBootstrapSchema.safeParse(JSON.parse(dec.decode(fromBase64(encoded ?? ''))));
-      } catch {
-        return null;
-      }
-    })();
-    if (!parsed?.success) {
-      forgetBootstrap();
-      return 'invalid';
-    }
-    try {
-      sessionStorage.setItem(BOOTSTRAP_KEY, JSON.stringify(parsed.data));
-    } catch {
-      /* the current page can still use it */
-    }
-    return parsed.data;
-  }
+  if (!params.has('clausroom-peer')) return null;
   try {
-    const stored = sessionStorage.getItem(BOOTSTRAP_KEY);
-    const parsed = stored ? PeerBootstrapSchema.safeParse(JSON.parse(stored)) : null;
-    if (!stored) return null;
-    if (parsed?.success) return parsed.data;
-    forgetBootstrap();
-    return 'invalid';
+    const raw = dec.decode(fromBase64(params.get('clausroom-peer') ?? ''));
+    const parsed = PeerBootstrapSchema.safeParse(JSON.parse(raw));
+    return parsed.success ? parsed.data : 'invalid';
   } catch {
-    forgetBootstrap();
-    return null;
+    return 'invalid';
   }
 }
 
