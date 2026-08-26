@@ -48,8 +48,11 @@ Auto mode defaults to Claude Opus 5 or GPT-5.6 Sol at low effort; change `model`
 and `effort` under `[agent]` to override them.
 
 The host browser displays an invite. Send it privately. The other browser
-pastes it and displays an answer; send that back to the host browser. A bad
-paste does not stop either command, and there is no copy/paste deadline.
+pastes it and displays an answer; send the answer currently on screen back to
+the host browser. Clausroom sets no deadline and refreshes an answer if the
+browser retires it while waiting.
+If a connection fails, **Copy network diagnostics** provides a timestamped,
+address-free trace of ICE states, candidate counts, errors, and the selected path type.
 
 Leave both commands and both browser tabs open.
 

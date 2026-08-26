@@ -21,6 +21,8 @@ agent installation.
 - WebRTC encrypts the browser-to-browser leg with DTLS. TURN is rejected, and
   the browsers refuse a selected ICE pair if either candidate is a relay or the
   direct pair cannot be proved.
+- Copyable network diagnostics record state, errors, counts, and candidate
+  types, but deliberately omit candidate addresses and pasted signaling codes.
 
 The peer therefore receives room HTTP/WebSocket traffic, not a network proxy.
 Every API request still needs a valid bearer token and room membership.

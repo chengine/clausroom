@@ -6,12 +6,14 @@ import {
   type PeerBootstrap,
   type PeerRoomInvite,
 } from '@clausroom/protocol';
+import { trace } from './trace.js';
 
 const BOOTSTRAP_KEY = 'clausroom.peer_bootstrap';
 const OFFER = 'CLAUSROOM-OFFER-2.';
 const ANSWER = 'CLAUSROOM-ANSWER-2.';
-const GATHER_MS = 10_000;
+const HEARTBEAT_MS = 5_000;
 const CLOSE_MS = 5_000;
+type Progress = (message: string) => void;
 
 interface Signal {
   v: typeof PEER.VERSION;
@@ -126,7 +128,9 @@ async function encodeSignal(signal: Signal): Promise<string> {
       body = raw;
     }
   }
-  return (signal.kind === 'offer' ? OFFER : ANSWER) + flag + toBase64(body);
+  const code = (signal.kind === 'offer' ? OFFER : ANSWER) + flag + toBase64(body);
+  trace('signal', `${signal.kind} encoded`, { characters: code.length });
+  return code;
 }
 
 async function decodeSignal(input: string, kind: Signal['kind']): Promise<Signal> {
@@ -152,44 +156,66 @@ async function decodeSignal(input: string, kind: Signal['kind']): Promise<Signal
     ) {
       throw new Error();
     }
+    trace('signal', `${kind} accepted`, { characters: compact.length });
     return value as Signal;
   } catch {
     throw new Error(`That ${kind} is damaged. Copy the whole code and try again.`);
   }
 }
 
-function connection(stun: string[]): RTCPeerConnection {
-  return new RTCPeerConnection({
+function connection(stun: string[], side: 'host' | 'guest'): RTCPeerConnection {
+  const pc = new RTCPeerConnection({
     iceServers: stun.length ? [{ urls: stun }] : [],
     iceCandidatePoolSize: 2,
   });
+  trace('peer', `${side}: created`, { stunServers: stun.length });
+  for (const [event, state] of [
+    ['signalingstatechange', () => pc.signalingState],
+    ['icegatheringstatechange', () => pc.iceGatheringState],
+    ['iceconnectionstatechange', () => pc.iceConnectionState],
+    ['connectionstatechange', () => pc.connectionState],
+  ] as const) pc.addEventListener(event, () => trace('peer', `${side}: ${event}`, state()));
+  pc.addEventListener('icecandidateerror', (event) => {
+    const error = event as RTCPeerConnectionIceErrorEvent;
+    trace('peer', `${side}: ICE candidate error`, { code: error.errorCode, text: error.errorText });
+  });
+  return pc;
 }
 
-/** Resolve with all candidates available, but do not make copy/paste time-limited. */
+/** Resolve only when the browser has finished gathering every candidate. */
 function gathered(pc: RTCPeerConnection): Promise<void> {
   if (pc.iceGatheringState === 'complete') return Promise.resolve();
   return new Promise((resolve) => {
-    const done = () => {
-      clearTimeout(timer);
+    const check = () => {
+      if (pc.iceGatheringState !== 'complete') return;
       pc.removeEventListener('icegatheringstatechange', check);
+      const lines = pc.localDescription?.sdp.match(/^a=candidate:.*$/gm) ?? [];
+      trace('peer', 'gathering complete', {
+        host: lines.filter((line) => / typ host/.test(line)).length,
+        public: lines.filter((line) => / typ (srflx|prflx|relay)/.test(line)).length,
+      });
       resolve();
     };
-    const check = () => {
-      if (pc.iceGatheringState === 'complete') done();
-    };
-    const timer = setTimeout(done, GATHER_MS);
     pc.addEventListener('icegatheringstatechange', check);
   });
 }
 
-function opened(
-  pc: RTCPeerConnection,
-  channel: RTCDataChannel,
-  failEarly = true,
-): Promise<void> {
+function heartbeat(pc: RTCPeerConnection, progress: Progress): () => void {
+  const started = Date.now();
+  const timer = setInterval(
+    () => progress(`Still connecting — ${Math.round((Date.now() - started) / 1000)}s (${pc.iceConnectionState}).`),
+    HEARTBEAT_MS,
+  );
+  trace('peer', 'waiting for the other browser');
+  return () => clearInterval(timer);
+}
+
+function opened(pc: RTCPeerConnection, channel: RTCDataChannel, progress: Progress): Promise<void> {
   if (channel.readyState === 'open') return Promise.resolve();
   return new Promise((resolve, reject) => {
+    const stop = heartbeat(pc, progress);
     const finish = (error?: Error) => {
+      stop();
       channel.removeEventListener('open', ok);
       channel.removeEventListener('error', fail);
       channel.removeEventListener('close', fail);
@@ -200,7 +226,7 @@ function opened(
     const ok = () => finish();
     const fail = () => finish(new Error('The peer connection failed.'));
     const state = () => {
-      if (failEarly && pc.connectionState === 'failed') {
+      if (pc.connectionState === 'failed') {
         finish(new Error('ICE found no usable direct path. Check the VPN or firewall and try again.'));
       } else if (pc.connectionState === 'closed') fail();
     };
@@ -209,7 +235,7 @@ function opened(
     channel.addEventListener('close', fail);
     pc.addEventListener('connectionstatechange', state);
     if (channel.readyState === 'closed') return fail();
-    if ((failEarly && pc.connectionState === 'failed') || pc.connectionState === 'closed') {
+    if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
       return state();
     }
   });
@@ -254,7 +280,12 @@ async function directPath(pc: RTCPeerConnection): Promise<string> {
       }
       const show = (candidate: CandidateReport) =>
         `${candidate.candidateType}/${candidate.protocol ?? '?'} ${candidate.address ?? candidate.ip ?? '?'}:${candidate.port ?? '?'}`;
-      return `${show(local)} → ${show(remote)}`;
+      const path = `${show(local)} → ${show(remote)}`;
+      trace('peer', 'direct path selected', {
+        local: `${local.candidateType}/${local.protocol ?? '?'}`,
+        remote: `${remote.candidateType}/${remote.protocol ?? '?'}`,
+      });
+      return path;
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
@@ -399,8 +430,9 @@ export interface HostPeer {
 export async function hostPeer(
   bootstrap: Extract<PeerBootstrap, { role: 'host' }>,
   lost: (message: string) => void,
+  progress: Progress,
 ): Promise<HostPeer> {
-  const pc = connection(bootstrap.stun);
+  const pc = connection(bootstrap.stun, 'host');
   const session = sessionId();
   const control = pc.createDataChannel(PEER.CONTROL_CHANNEL, { ordered: true });
   const tunnels = new Set<RTCDataChannel>();
@@ -487,8 +519,9 @@ export async function hostPeer(
       if (answer.session !== session) throw new Error('That answer belongs to another invite.');
       if (applied) throw new Error('That answer was already applied.');
       await pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp });
+      trace('peer', 'host: answer applied');
       applied = true;
-      await opened(pc, control);
+      await opened(pc, control, progress);
       const path = await directPath(pc);
       authorized = true;
       welcomed = true;
@@ -520,9 +553,10 @@ export async function guestPeer(
   bootstrap: Extract<PeerBootstrap, { role: 'guest' }>,
   welcome: (room: PeerRoomInvite) => void,
   lost: (message: string) => void,
+  progress: Progress,
 ): Promise<GuestPeer> {
   const offer = await decodeSignal(offerCode, 'offer');
-  const pc = connection(bootstrap.stun);
+  const pc = connection(bootstrap.stun, 'guest');
   const tunnels = new Set<RTCDataChannel>();
   const tunnelIds = new Set<string>();
   let control: RTCDataChannel | null = null;
@@ -537,9 +571,7 @@ export async function guestPeer(
   pc.ondatachannel = ({ channel }) => {
     if (channel.label !== PEER.CONTROL_CHANNEL || control) return channel.close();
     control = channel;
-    // Manual signaling may report `failed` before the host pastes our answer.
-    // Keep the proven Crazy Camels behavior: wait for the channel.
-    prove = opened(pc, channel, false).then(() => directPath(pc));
+    prove = opened(pc, channel, progress).then(() => directPath(pc));
     channel.addEventListener('close', () =>
       failed('The direct connection closed. Ask the host for a fresh invite.'),
     );
@@ -581,9 +613,16 @@ export async function guestPeer(
     sdp: pc.localDescription?.sdp ?? '',
   });
   const connected = new Promise<string>((resolve, reject) => {
+    const stop = heartbeat(pc, progress);
     const wait = () => {
-      if (prove) void prove.then(resolve, reject);
-      else if (pc.connectionState === 'failed' || pc.connectionState === 'closed') reject(new Error('The peer failed.'));
+      if (prove) {
+        stop();
+        void prove.then(resolve, reject);
+      }
+      else if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+        stop();
+        reject(new Error('The answer expired before the host used it.'));
+      }
       else setTimeout(wait, 25);
     };
     wait();

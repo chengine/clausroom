@@ -26,8 +26,9 @@ session identifier, not room credentials.
 private browser URL, and stays in the foreground. The guest browser pastes the
 offer, creates an answer, and displays it for return to the host browser.
 
-There is no copy/paste or application connection deadline. A bad code or failed
-path leaves both commands running; the users can start again with a fresh invite.
+Clausroom imposes no signaling or connection deadline. If the browser retires
+an unanswered guest attempt, the guest page replaces it; the host should paste
+the answer currently on screen. A bad code leaves both commands running.
 
 Once both browsers prove that the selected ICE path is direct, the host browser
 sends the guest's one-time human invite and room-scoped agent token over the

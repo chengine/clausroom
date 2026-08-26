@@ -10,6 +10,7 @@ import {
   type HostPeer,
 } from '../peer.js';
 import { Wordmark } from './Wordmark.js';
+import { trace, traceText } from '../trace.js';
 
 function copy(value: string): void {
   void navigator.clipboard.writeText(value);
@@ -90,6 +91,9 @@ function HostSetup({
             setConnected(false);
             setStatus(message);
           }
+        },
+        (message) => {
+          if (!cancelled) setStatus(message);
         },
       );
     };
@@ -261,41 +265,45 @@ function GuestSetup({
     setAnswer('');
     setBusy(true);
     setStatus('Creating your answer…');
-    void guestPeer(
-      offer,
-      bootstrap,
-      (invite) => {
-        if (attempt.current !== currentAttempt) return;
-        room.current = invite;
-        if (control.current?.readyState === WebSocket.OPEN) {
-          control.current.send(JSON.stringify({ type: 'join', invite }));
-        }
-      },
-      (message) => {
-        if (attempt.current === currentAttempt) stopPeer(message, true);
-      },
-    ).then(
-      (created) => {
-        if (attempt.current !== currentAttempt) return created.close();
-        setBusy(false);
-        peer.current = created;
-        setAnswer(created.code);
-        setStatus('Send this answer to the host. There is no copy/paste deadline.');
-        void created.connected.then(
-          (path) => console.info(`[clausroom-peer] direct ${path}`),
-          (error: unknown) => {
-            if (attempt.current === currentAttempt) {
-              stopPeer(error instanceof Error ? error.message : 'The direct path failed.', true);
-            }
-          },
-        );
-      },
-      (error: unknown) => {
-        if (attempt.current === currentAttempt) {
-          stopPeer(error instanceof Error ? error.message : 'That invite was not accepted.');
-        }
-      },
-    );
+    const makeAnswer = async (): Promise<void> => {
+      const created = await guestPeer(
+        offer,
+        bootstrap,
+        (invite) => {
+          if (attempt.current !== currentAttempt) return;
+          room.current = invite;
+          if (control.current?.readyState === WebSocket.OPEN) {
+            control.current.send(JSON.stringify({ type: 'join', invite }));
+          }
+        },
+        (message) => {
+          if (attempt.current === currentAttempt) stopPeer(message, true);
+        },
+        (message) => {
+          if (attempt.current === currentAttempt) setStatus(message);
+        },
+      );
+      if (attempt.current !== currentAttempt) return created.close();
+      setBusy(false);
+      peer.current = created;
+      setAnswer(created.code);
+      setStatus('Send the current answer to the host.');
+      try {
+        console.info(`[clausroom-peer] direct ${await created.connected}`);
+      } catch {
+        if (attempt.current !== currentAttempt || peer.current !== created) return;
+        created.close();
+        peer.current = null;
+        trace('peer', 'guest: answer expired; refreshing');
+        setStatus('That answer expired; creating a fresh one…');
+        await makeAnswer();
+      }
+    };
+    void makeAnswer().catch((error: unknown) => {
+      if (attempt.current === currentAttempt) {
+        stopPeer(error instanceof Error ? error.message : 'That invite was not accepted.');
+      }
+    });
   };
 
   return (
@@ -324,7 +332,14 @@ function GuestSetup({
           )}
         </div>
       </form>
-      {answer && <CodeField label="2. Send this answer" value={answer} copyLabel="Copy answer" readOnly />}
+      {answer && (
+        <CodeField
+          label="2. Send the current answer"
+          value={answer}
+          copyLabel="Copy answer"
+          readOnly
+        />
+      )}
     </SetupCard>
   );
 }
@@ -339,6 +354,9 @@ function SetupCard({ title, status, children }: { title: string; status: string;
           <p className="peer-status">{status}</p>
         </div>
         {children}
+        <button className="btn btn--ghost" type="button" onClick={() => copy(traceText())}>
+          Copy network diagnostics
+        </button>
         <p className="login-footnote">The codes contain connection details. Exchange them privately.</p>
       </section>
     </main>
