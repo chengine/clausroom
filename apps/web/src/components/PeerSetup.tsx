@@ -209,7 +209,10 @@ function GuestSetup({
         } catch {
           return;
         }
-        if (value.type === 'tunnel' && typeof value.id === 'string') peer.current?.openTunnel(value.id);
+        if (value.type === 'tunnel' && typeof value.id === 'string') {
+          trace('peer', `tunnel ${value.id.slice(0, 8)}: requested by connector`);
+          peer.current?.openTunnel(value.id);
+        }
         else if (
           value.type === 'session' &&
           peer.current &&

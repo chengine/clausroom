@@ -8,7 +8,7 @@
  */
 import { ServerFrameSchema, type ServerFrame } from '@clausroom/protocol';
 
-export type ConnectionState = 'connecting' | 'online' | 'reconnecting' | 'denied' | 'stopped';
+export type ConnectionState = 'connecting' | 'online' | 'syncing' | 'reconnecting' | 'denied' | 'stopped';
 
 export interface RoomSocketHandlers {
   onFrame: (frame: ServerFrame) => void;

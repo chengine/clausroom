@@ -263,7 +263,8 @@ function tunnelUrl(secret: string, id?: string): string {
 }
 
 /** Bounded, binary-only bridge. A failure closes this tunnel, not the room. */
-function bridge(channel: RTCDataChannel, socket: WebSocket): void {
+function bridge(channel: RTCDataChannel, socket: WebSocket, id: string): void {
+  trace('peer', `tunnel ${id.slice(0, 8)}: bridge created`);
   channel.binaryType = 'arraybuffer';
   socket.binaryType = 'arraybuffer';
   channel.bufferedAmountLowThreshold = PEER.BUFFER_LOW;
@@ -366,17 +367,19 @@ function bridge(channel: RTCDataChannel, socket: WebSocket): void {
 
   socket.onmessage = (event) => enqueue(toChannel, event.data, true);
   channel.onmessage = (event) => enqueue(toSocket, event.data, false);
-  socket.onopen = pump;
-  channel.onopen = pump;
+  socket.onopen = () => { trace('peer', `tunnel ${id.slice(0, 8)}: loopback open`); pump(); };
+  channel.onopen = () => { trace('peer', `tunnel ${id.slice(0, 8)}: data channel open`); pump(); };
   channel.onbufferedamountlow = pump;
   socket.onerror = abort;
   channel.onerror = abort;
   socket.onclose = () => {
+    trace('peer', `tunnel ${id.slice(0, 8)}: loopback closed`);
     socketEnded = true;
     closeTimer ??= setTimeout(abort, CLOSE_MS);
     pump();
   };
   channel.onclose = () => {
+    trace('peer', `tunnel ${id.slice(0, 8)}: data channel closed`);
     channelEnded = true;
     closeTimer ??= setTimeout(abort, CLOSE_MS);
     pump();
@@ -438,7 +441,7 @@ export async function hostPeer(
     }
     tunnels.add(channel);
     channel.addEventListener('close', () => tunnels.delete(channel));
-    bridge(channel, new WebSocket(tunnelUrl(bootstrap.secret)));
+    bridge(channel, new WebSocket(tunnelUrl(bootstrap.secret)), id);
   };
   control.onmessage = (event) => {
     try {
@@ -633,7 +636,7 @@ export async function guestPeer(
             tunnels.delete(created);
             tunnelIds.delete(id);
           });
-          bridge(created, new WebSocket(tunnelUrl(bootstrap.secret, id)));
+          bridge(created, new WebSocket(tunnelUrl(bootstrap.secret, id)), id);
         } catch {
           channel?.close();
           tunnelIds.delete(id);

@@ -307,6 +307,7 @@ export function useRoomState(
   useEffect(() => {
     let cancelled = false;
     let online = false;
+    let synced = false;
     lastMessageRef.current = null;
     requestedArtifactsRef.current = new Set();
 
@@ -316,13 +317,16 @@ export function useRoomState(
       },
       onState: (conn) => {
         online = conn === 'online';
-        if (!cancelled) dispatch({ type: 'conn', conn });
+        if (!cancelled) dispatch({ type: 'conn', conn: !online && synced ? 'syncing' : conn });
       },
     });
     // WebSocket is the fast path. REST catch-up keeps a tunnelled browser
     // correct even when an intermediary cannot complete a WebSocket upgrade.
     const fallback = setInterval(() => {
-      if (!cancelled && !online) void catchUp(lastMessageRef.current?.id ?? null).catch(() => undefined);
+      if (!cancelled && !online) void catchUp(lastMessageRef.current?.id ?? null).then(() => {
+        synced = true;
+        if (!cancelled && !online) dispatch({ type: 'conn', conn: 'syncing' });
+      }).catch(() => undefined);
     }, 2_000);
 
     void (async () => {

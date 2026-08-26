@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { LIMITS, type Approval, type Message, type User } from '@clausroom/protocol';
 import { errorText } from '../api.js';
 import { buildColorMap, colorFor } from '../colors.js';
+import { traceText } from '../trace.js';
 import { CONTINUE_MESSAGE_BODY, agentTurnRun, useRoomState } from '../useRoomState.js';
 import type { ConnectionState } from '../ws.js';
 import { ApprovalCard } from './ApprovalCard.js';
@@ -34,6 +35,7 @@ type TimelineItem =
 const CONN_LABEL: Record<ConnectionState, string> = {
   connecting: 'connecting',
   online: 'live',
+  syncing: 'synced',
   reconnecting: 'reconnecting',
   denied: 'access denied',
   stopped: 'offline',
@@ -230,6 +232,9 @@ export function RoomView({ token, roomId, me, onBack, onUnauthorized }: RoomView
           <ThemeToggle />
         </div>
         <div className="room-header__actions">
+          <button className="btn btn--sm btn--ghost" type="button" onClick={() => void navigator.clipboard.writeText(traceText())}>
+            Copy diagnostics
+          </button>
           {state.room && (
             <button
               type="button"

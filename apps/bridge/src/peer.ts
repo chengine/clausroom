@@ -185,8 +185,10 @@ export async function startGuestRelay(options: GuestRelayOptions): Promise<Guest
       return;
     }
     const id = randomBytes(12).toString('hex');
+    log(`[clausroom-peer] tunnel ${id.slice(0, 8)}: room request queued`);
     const timer = setTimeout(() => {
       pending.delete(id);
+      log(`[clausroom-peer] tunnel ${id.slice(0, 8)}: browser did not claim request`);
       socket.destroy();
     }, WAIT_MS);
     timer.unref();
@@ -305,10 +307,14 @@ export async function startGuestRelay(options: GuestRelayOptions): Promise<Guest
     const waiting = pending.get(id);
     if (!waiting || !/^[0-9a-f]{24}$/.test(id)) return socket.destroy();
     tunnels.handleUpgrade(req, socket, head, (ws) => {
+      log(`[clausroom-peer] tunnel ${id.slice(0, 8)}: browser bridge open`);
       pending.delete(id);
       clearTimeout(waiting.timer);
       active.add(ws);
-      const drop = () => active.delete(ws);
+      const drop = () => {
+        active.delete(ws);
+        log(`[clausroom-peer] tunnel ${id.slice(0, 8)}: browser bridge closed`);
+      };
       ws.once('close', drop);
       ws.once('error', drop);
       bindNodeTunnel(waiting.socket, ws);

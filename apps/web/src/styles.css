@@ -958,12 +958,14 @@ select.input {
   background: var(--text-faint);
 }
 
-.conn-pill--online {
+.conn-pill--online,
+.conn-pill--syncing {
   border-color: color-mix(in srgb, var(--emerald) 45%, transparent);
   color: var(--emerald);
 }
 
-.conn-pill--online .conn-pill__dot {
+.conn-pill--online .conn-pill__dot,
+.conn-pill--syncing .conn-pill__dot {
   background: var(--emerald);
   box-shadow: 0 0 8px color-mix(in srgb, var(--emerald) 80%, transparent);
   animation: pulse 2.2s ease-in-out infinite;
