@@ -320,10 +320,17 @@ export function useRoomState(
         if (!cancelled) dispatch({ type: 'conn', conn: !online && synced ? 'syncing' : conn });
       },
     });
-    // WebSocket is the fast path. REST catch-up keeps a tunnelled browser
-    // correct even when an intermediary cannot complete a WebSocket upgrade.
+    // WebSocket is the fast path. Periodic REST reconciliation repairs a
+    // missed shared-setting frame and keeps a tunnelled browser usable when
+    // an intermediary cannot complete a WebSocket upgrade.
     const fallback = setInterval(() => {
-      if (!cancelled && !online) void catchUp(lastMessageRef.current?.id ?? null).then(() => {
+      if (cancelled) return;
+      void api.getRoom(token, roomId).then(async (detail) => {
+        if (cancelled) return;
+        dispatch({ type: 'room', room: detail.room });
+        dispatch({ type: 'participants', participants: detail.participants });
+        if (online) return;
+        await catchUp(lastMessageRef.current?.id ?? null);
         synced = true;
         if (!cancelled && !online) dispatch({ type: 'conn', conn: 'syncing' });
       }).catch(() => undefined);

@@ -1584,6 +1584,25 @@ try {
     );
     assert.equal(detail.my_role, 'human');
 
+    const guestLimit = ok(
+      await api('PUT', `${guestBase}/api/rooms/${room}/turn-limit`, {
+        token: guestHuman,
+        json: { agent_turn_limit: 4 },
+      }),
+      200,
+      'guest changes shared turn limit',
+    );
+    assert.equal(guestLimit.room.agent_turn_limit, 4);
+    await humanProbe.waitFor(
+      (f) => f.type === 'room_updated' && f.room.agent_turn_limit === 4,
+      'host receives guest turn limit',
+      20_000,
+    );
+    await api('PUT', `${guestBase}/api/rooms/${room}/turn-limit`, {
+      token: guestHuman,
+      json: { agent_turn_limit: 3 },
+    });
+
     const said = ok(
       await api('POST', `${guestBase}/api/rooms/${room}/messages`, {
         token: guestHuman,
