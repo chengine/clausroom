@@ -53,10 +53,10 @@ agent permissions, and the one project directory; it never holds credentials.
 Auto mode defaults to Claude Opus 5 or GPT-5.6 Sol at low effort; change `model`
 and `effort` under `[agent]` to override them.
 
-The host browser displays an invite. Send it privately. The other browser
-pastes it and displays an answer; send the answer currently on screen back to
-the host browser. Clausroom sets no deadline and refreshes an answer if the
-browser retires it while waiting.
+The host browser displays an invite, which has no paste deadline. Send it
+privately. The other browser displays an answer that WebRTC keeps alive only
+briefly; Clausroom refreshes it when necessary. Send whichever answer is
+currently on screen and have the host paste it while the guest watches.
 If a connection fails, **Copy network diagnostics** provides a timestamped,
 address-free trace of ICE states, candidate counts, errors, and the selected path type.
 

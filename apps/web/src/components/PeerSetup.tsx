@@ -175,6 +175,7 @@ function GuestSetup({
   const attempt = useRef(0);
   const [offer, setOffer] = useState('');
   const [answer, setAnswer] = useState('');
+  const [answerAttempt, setAnswerAttempt] = useState(0);
   const [status, setStatus] = useState('Connecting to the local Clausroom command…');
   const [connected, setConnected] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -185,6 +186,7 @@ function GuestSetup({
     peer.current = null;
     room.current = null;
     setAnswer('');
+    setAnswerAttempt(0);
     if (clearOffer) setOffer('');
     setBusy(false);
     setConnected(null);
@@ -268,6 +270,7 @@ function GuestSetup({
     peer.current = null;
     room.current = null;
     setAnswer('');
+    setAnswerAttempt(0);
     setBusy(true);
     setStatus('Creating your answer…');
     const makeAnswer = async (): Promise<void> => {
@@ -292,6 +295,7 @@ function GuestSetup({
       setBusy(false);
       peer.current = created;
       setAnswer(created.code);
+      setAnswerAttempt((n) => n + 1);
       setStatus('Send the current answer to the host.');
       try {
         console.info(`[clausroom-peer] direct ${await created.connected}`);
@@ -339,11 +343,18 @@ function GuestSetup({
       </form>
       {answer && (
         <CodeField
-          label="2. Send the current answer"
+          label={answerAttempt > 1 ? `2. Send this answer (refreshed ${answerAttempt - 1} times)` : '2. Send this answer'}
           value={answer}
           copyLabel="Copy answer"
           readOnly
         />
+      )}
+      {answer && (
+        <p className="login-footnote">
+          Keep this tab open. The browser retires an unanswered code after a few seconds and
+          Clausroom replaces it. Always send whichever code is on screen now and have the host
+          paste it while you watch.
+        </p>
       )}
     </SetupCard>
   );
